@@ -1,0 +1,5 @@
+# torch/torchvision SOLO desde cu130 (Blackwell sm_120). ARREGLO CRITICO:
+# --index-url (NO --extra-index-url) garantiza que salgan del indice cu130.
+--index-url https://download.pytorch.org/whl/cu130
+torch==2.11.0
+torchvision==0.26.0

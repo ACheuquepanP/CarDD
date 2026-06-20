@@ -1,0 +1,11 @@
+# Todo menos torch/torchvision (desde PyPI). Instalar DESPUES de requirements-torch.txt.
+timm>=1.0.27,<2.0
+pycocotools>=2.0.8
+numpy>=2.1,<2.4
+opencv-python-headless>=4.10,<5
+pillow>=10.4
+pyyaml>=6.0
+tqdm>=4.66
+tensorboard>=2.18
+scipy>=1.13
+matplotlib>=3.9

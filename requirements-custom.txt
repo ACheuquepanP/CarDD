@@ -1,0 +1,2 @@
+# Fase B (Equipo C). Solo al entrar en §5.2.
+einops>=0.8
