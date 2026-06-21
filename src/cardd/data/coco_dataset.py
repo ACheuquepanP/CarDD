@@ -35,8 +35,11 @@ from torchvision import tv_tensors
 from torchvision.transforms.v2 import functional as F
 
 
-def _resolve_split(root: Path, split: str) -> tuple[Path, Path]:
-    """Localiza (json_anotaciones, carpeta_imagenes) del layout CarDD-COCO."""
+def resolve_split(root: Path, split: str) -> tuple[Path, Path]:
+    """Localiza (json_anotaciones, carpeta_imagenes) del layout CarDD-COCO.
+
+    Publica para que E reuse la resolucion de paths del GT sin reimplementarla.
+    """
     ann_candidates = [
         root / "annotations" / f"instances_{split}2017.json",
         root / "annotations" / f"instances_{split}.json",
@@ -66,8 +69,10 @@ class CarDDCocoDataset(Dataset):
         self.split = split
         self.transforms = transforms
 
-        ann_file, self.img_dir = _resolve_split(self.root, split)
-        self.coco = COCO(str(ann_file))
+        # ann_file: ruta resuelta del JSON GT (E lo necesita para evaluar);
+        # self.coco: objeto COCO ground-truth ya cargado (reusalo, no recargues).
+        self.ann_file, self.img_dir = resolve_split(self.root, split)
+        self.coco = COCO(str(self.ann_file))
         self.ids = sorted(self.coco.imgs.keys())
 
         cat_ids = sorted(self.coco.getCatIds())
