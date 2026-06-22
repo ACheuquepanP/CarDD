@@ -1,1 +1,26 @@
-# CarDD · configs/backbones/convnextv2_tiny.yaml · Estado: Pendiente
+# configs/backbones/convnextv2_tiny.yaml
+# dueño: M · fase: 3 · contrato: C4
+#
+# Backbone por defecto del proyecto bajo el presupuesto de 8 GB
+# (Blackwell / RTX 5060). Hereda TODO de base.yaml y solo declara el bloque
+# del backbone: es la fuente de verdad de "qué es el backbone tiny".
+#
+# Composición prevista:
+#   configs/ablation/a0_baseline.yaml  ->  _base_: ../backbones/convnextv2_tiny.yaml  ->  ../base.yaml
+#
+# Las claves bajo model.backbone se pasan tal cual al constructor de
+# ConvNeXtV2Tiny (registrado en models/backbones/convnextv2_fpn.py vía BACKBONES),
+# así que deben coincidir con su firma. No agregar claves que el constructor no acepte.
+
+_base_: ../base.yaml
+
+model:
+  backbone:
+    name: convnextv2_tiny       # -> BACKBONES; 'name' lo consume el registry, el resto va al __init__
+    pretrained: true            # pesos ImageNet (timm); coinciden con data.image_mean/std de base
+    in_channels: 3              # RGB
+    out_channels: 256           # ancho del FPN, igual en los 5 niveles ("0".."3" + "pool")
+    out_indices: [0, 1, 2, 3]   # 4 stages de ConvNeXt-V2 -> FPN (reducciones 4/8/16/32)
+    freeze_backbone: false      # Tiny entra entero en 8 GB con AMP + grad-accum (P, §7 espec)
+    # checkpoint_path:          # (opcional) pesos locales no-ImageNet; si se usan,
+    #                           #  re-alinear data.image_mean/std al preentrenamiento de esos pesos
