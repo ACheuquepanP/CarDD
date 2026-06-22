@@ -1,1 +1,31 @@
-# CarDD · configs/ablation/a3_pointrend.yaml · Estado: Pendiente
+# CarDD · configs/ablation/a3_pointrend.yaml
+# Fila a3 (Equipo C, Fase 5) · Contrato C4·C3
+#
+# Delta sobre a0: reemplaza el mask_head y el mask_predictor por las variantes
+# PointRend (slots HEADS que M construye e inyecta a MaskRCNN, handoff §4.1).
+# Todo lo demás se hereda de a0 -> base. Un cambio por fila: la rama de máscara.
+#
+# PointRend completo: el companion `mask_rcnn_pointrend` aplica el point-loss
+# (train) y la subdivisión (inference) sobre estos módulos. Los hiperparámetros
+# de muestreo/subdivisión viven en el predictor; el companion los lee de ahí
+# (autodescriptivo por config). Si se quita la línea `detector`, la fila degrada
+# a máscara coarse (el predictor es drop-in del de torchvision).
+_base_: a0_baseline.yaml
+
+model:
+  detector:
+    name: mask_rcnn_pointrend
+    point_loss_weight: 1.0          # peso del point-loss sumado a loss_mask
+    point_target_resolution: 112    # res. del GT rasterizado para targets de punto
+  mask_head:
+    name: pointrend_mask_head
+    in_channels: 256                # ancho FPN
+  mask_predictor:
+    name: pointrend_mask_predictor
+    in_channels: 256
+    num_classes: 7                  # 6 daños + fondo
+    train_num_points: 196
+    oversample_ratio: 3.0
+    importance_sample_ratio: 0.75
+    subdivision_steps: 3
+    subdivision_num_points: 196

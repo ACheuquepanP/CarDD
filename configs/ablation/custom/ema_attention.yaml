@@ -1,0 +1,9 @@
+# CarDD · configs/ablation/custom/ema_attention.yaml
+# Fila custom §5.2 (Equipo C, Fase B) · Contrato C4·C3
+# Delta sobre a0: inserta el neck EMA que envuelve el FPN. in_channels lo inyecta
+# M (= out_channels del backbone). Un cambio por fila: el neck.
+_base_: ../a0_baseline.yaml
+model:
+  neck:
+    name: ema_attention
+    factor: 8

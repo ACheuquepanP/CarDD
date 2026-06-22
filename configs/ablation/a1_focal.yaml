@@ -1,1 +1,14 @@
-# CarDD · configs/ablation/a1_focal.yaml · Estado: Pendiente
+# CarDD · configs/ablation/a1_focal.yaml
+# Fila a1 (Equipo C, Fase 5) · Contrato C4·C3
+#
+# Delta MÍNIMO sobre a0: cambia el detector por su variante focal y declara los
+# hiperparámetros. Todo lo demás (backbone, datos, schedule de 8 GB) se HEREDA de
+# a0_baseline.yaml -> base.yaml. Un cambio por fila: aquí, el loss de clasificación.
+_base_: a0_baseline.yaml
+
+model:
+  detector:
+    name: mask_rcnn_focal      # registrado en DETECTORS por mask_rcnn_focal.py
+    focal:
+      alpha: 0.5               # balanceo (matriz de ablación)
+      gamma: 2.0               # enfoque
