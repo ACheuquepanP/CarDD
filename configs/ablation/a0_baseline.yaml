@@ -10,5 +10,5 @@
 
 _base_: ../backbones/convnextv2_tiny.yaml
 
-train:
-  output_dir: outputs/a0_baseline
+output:
+  dir: outputs/a0_baseline

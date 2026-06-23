@@ -76,7 +76,7 @@ class Trainer:
         self.amp = bool(get(cfg, "train.amp", True)) and self.device.type == "cuda"
         self.log_interval = int(get(cfg, "train.log_interval", 10))
         self.grad_clip = get(cfg, "train.grad_clip", None)
-        self.out_dir = Path(get(cfg, "train.output_dir", "outputs/run"))
+        self.out_dir = Path(get(cfg, "output.dir", "outputs/run"))
         self.out_dir.mkdir(parents=True, exist_ok=True)
 
         steps_per_epoch = max(1, math.ceil(len(self.loader) / self.accum))
@@ -173,7 +173,8 @@ if __name__ == "__main__":
             "backbone": {"name": "convnextv2_tiny", "pretrained": False},
         },
         "train": {"device": "cpu", "max_epochs": 1, "grad_accum_steps": 2,
-                  "amp": False, "log_interval": 1, "output_dir": "outputs/_smoke"},
+                  "amp": False, "log_interval": 1},
+        "output": {"dir": "outputs/_smoke"},
         "optim": {"name": "adamw", "lr": 1e-4, "scheduler": "none"},
     }
 
