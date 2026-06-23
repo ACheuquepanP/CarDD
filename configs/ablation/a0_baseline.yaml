@@ -1,32 +1,14 @@
 # configs/ablation/a0_baseline.yaml
 # dueño: M · fase: 4 · contrato: C4 (entrada C1 · salida C2)
 #
-# Línea base del estudio de ablación: Mask R-CNN + ConvNeXt-V2 Tiny, sin módulos.
-# Hereda el backbone (que a su vez hereda base.yaml con data/eval/mean-std).
-# Aquí se declaran SOLO entrenamiento y optimizador.
+# Línea base: Mask R-CNN + ConvNeXt-V2 Tiny, sin módulos de ablación.
 #
-# Este archivo es la fuente de verdad del *schedule*: las filas a1–a4 (de C)
-# deberían heredar de aquí (``_base_: a0_baseline.yaml``) y cambiar UNA sola cosa,
-# para que el schedule quede fijo entre filas (higiene de P: medir señal, no ruido).
-#
-# NOTA: si P prefiere que train/optim vivan en base.yaml (constante global para
-# todas las filas), mover este bloque es trivial; lo dejo aquí para no editar
-# base.yaml desde M.
+# FUENTE ÚNICA DEL SCHEDULE: vive en base.yaml (bloques `train` y `optim`),
+# como constante entre filas, bajo custodia de P (misma lógica que `image_mean/std`).
+# a0 NO redeclara el schedule: solo fija dónde escribir las salidas. Las filas
+# a1–a4 heredan de a0 y cambian UNA sola cosa → el schedule queda fijo para todas.
 
 _base_: ../backbones/convnextv2_tiny.yaml
 
 train:
   output_dir: outputs/a0_baseline
-  device: cuda
-  max_epochs: 12
-  grad_accum_steps: 8        # batch físico 1-2 → emula ~8-16 efectivo (8 GB, AMP)
-  amp: true
-  log_interval: 20
-  grad_clip: 1.0             # estabiliza el arranque con AMP
-
-optim:
-  name: adamw                # AdamW va bien con ConvNeXt
-  lr: 1.0e-4
-  weight_decay: 0.05
-  scheduler: cosine
-  warmup_iters: 250          # warmup lineal antes del coseno
