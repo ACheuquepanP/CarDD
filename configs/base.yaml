@@ -1,52 +1,53 @@
 # CarDD · configs/base.yaml — config base (Fase 0, Equipo P) · Contrato C4
-# INMUTABLE entre filas de ablación: las filas heredan de aquí con '_base_'
-# y solo declaran su delta. Tocar esto cambia TODOS los experimentos.
+# INMUTABLE entre filas: las filas heredan con '_base_' y solo declaran su delta.
+# Las CONSTANTES de proyecto (schedule, mean/std) viven aquí; curarlas es
+# custodia de P, no un override por fila.
 
 seed: 42
-deterministic: false          # true para auditar; cuesta algo de velocidad
+deterministic: false
 
 # --- Datos (Equipo D afina en Fase 1) ---
 data:
-  root: data/CarDD_COCO       # raíz del dataset COCO en disco
-  num_classes: 6              # 6 clases de daño
-  split: [0.7, 0.2, 0.1]      # train : val : test (7:2:1)
-  # Resolución recortada para 8 GB (el 1333px del paper no entra).
-  # Valor fijo de la casa; se valida en el smoke test (Fase 4).
+  root: data/CarDD_COCO
+  num_classes: 6
+  split: [0.7, 0.2, 0.1]
   image_min_size: 640
   image_max_size: 1024
+  image_mean: [0.485, 0.456, 0.406]   # ImageNet (ConvNeXt-V2 preentrenado), escala [0,1]
+  image_std:  [0.229, 0.224, 0.225]
   num_workers: 4
 
-# --- Modelo (Equipo M afina en Fase 3) ---
+# --- Modelo (M afina en Fase 3; backbone-específico -> convnextv2_tiny.yaml) ---
 model:
   detector:
-    name: mask_rcnn           # registrado en DETECTORS (C3)
+    name: mask_rcnn
   backbone:
-    name: convnextv2_tiny     # Tiny por defecto; Base/Large solo con más VRAM
+    name: convnextv2_tiny
     pretrained: true
-  # los módulos de ablación (focal, pointrend...) se inyectan por override
 
-# --- Entrenamiento (higiene de 8 GB, constante entre filas) ---
+# --- Entrenamiento: schedule = constante de proyecto, FIJO entre filas ---
 train:
   epochs: 12
-  batch_size: 2               # batch físico 1-2 para 8 GB
-  grad_accum_steps: 8         # emula batch mayor (2 x 8 = 16 efectivo)
-  amp: true                   # precisión mixta ON (cabe en 8 GB)
+  batch_size: 2               # físico (8 GB)
+  grad_accum_steps: 8         # batch efectivo = 16
+  grad_clip: 1.0              # clip de norma del gradiente
+  amp: true                   # precisión mixta
   optimizer:
     name: adamw
     lr: 0.0001
     weight_decay: 0.05
   scheduler:
     name: cosine
-    warmup_epochs: 1
+    warmup_steps: 250
 
 # --- Evaluación (Equipo E, Fase 2) ---
 eval:
   metrics: [mask_AP, box_AP, AP50, AP75]
   per_class: true
-  per_scale: true             # APS / APM / APL
+  per_scale: true
 
 # --- Logging / salidas ---
 output:
   dir: outputs
-  log_every: 50               # iteraciones
+  log_every: 50
   tensorboard: true
