@@ -117,6 +117,7 @@ def test_perfect_prediction_gives_ap_1(coco_gt):
     assert c5["mask_AP"] > 0.99, f"mask_AP={c5['mask_AP']}"
     assert c5["box_AP"] > 0.99, f"box_AP={c5['box_AP']}"
     assert c5["AP50"] > 0.99 and c5["AP75"] > 0.99
+    assert c5["mask_boundary_AP"] > 0.99, f"boundary={c5['mask_boundary_AP']}"
     # objetos pequenos -> la banda small debe estar perfecta
     assert c5["per_scale"]["APS"] > 0.99, f"APS={c5['per_scale']['APS']}"
 
@@ -131,6 +132,7 @@ def test_per_class_keys_and_values(coco_gt):
     for name, ap in c5["per_class"].items():
         assert ap["mask_AP"] > 0.99, f"{name} mask_AP={ap['mask_AP']}"
         assert ap["box_AP"] > 0.99, f"{name} box_AP={ap['box_AP']}"
+        assert ap["boundary_AP"] > 0.99, f"{name} boundary_AP={ap['boundary_AP']}"
 
 
 def test_c5_contract_shape(coco_gt):
@@ -185,17 +187,18 @@ def test_evaluate_from_dataset(coco_gt):
 # =====================================================================
 
 
-def _c5(mask, box, ap50, ap75, aps, apm, apl, per_class):
+def _c5(mask, box, ap50, ap75, aps, apm, apl, per_class, bnd=None):
     return {
         "mask_AP": mask, "box_AP": box, "AP50": ap50, "AP75": ap75,
+        "mask_boundary_AP": mask if bnd is None else bnd,
         "per_class": per_class,
         "per_scale": {"APS": aps, "APM": apm, "APL": apl},
     }
 
 
 def _pc(dent_m, scr_m):
-    return {"dent": {"mask_AP": dent_m, "box_AP": dent_m},
-            "scratch": {"mask_AP": scr_m, "box_AP": scr_m}}
+    return {"dent": {"mask_AP": dent_m, "box_AP": dent_m, "boundary_AP": dent_m},
+            "scratch": {"mask_AP": scr_m, "box_AP": scr_m, "boundary_AP": scr_m}}
 
 
 @pytest.fixture
@@ -238,3 +241,106 @@ def test_load_results_partial(tmp_path, ablation_results):
     (tmp_path / "a0_baseline.json").write_text(json.dumps(ablation_results["a0_baseline"]))
     loaded = ra.load_results(tmp_path, ["a0_baseline.yaml", "a2_focal_multiscale.yaml"])
     assert set(loaded) == {"a0_baseline"}
+
+
+def test_marginal_vs_cumulative_deltas():
+    """Acumulativa (gate ③): Δ vs baseline = ganancia acumulada;
+    Δ vs fila anterior = contribución marginal del módulo que entra."""
+    R = {
+        "a0_baseline": _c5(0.40, 0.45, 0.60, 0.42, 0.20, -1.0, 0.55, _pc(0.50, 0.30)),
+        "a1_focal": _c5(0.44, 0.45, 0.61, 0.42, 0.21, -1.0, 0.55, _pc(0.50, 0.42)),
+        "a2_focal_multiscale": _c5(0.46, 0.46, 0.62, 0.44, 0.29, -1.0, 0.56, _pc(0.51, 0.42)),
+    }
+    table = ra.build_table(R, "a0_baseline")
+    a2 = table[2]
+    assert a2["deltas"]["mask_AP"] == pytest.approx(0.06)        # acumulada vs a0
+    assert a2["deltas_prev"]["mask_AP"] == pytest.approx(0.02)   # marginal vs a1
+    assert a2["deltas_prev"]["APS"] == pytest.approx(0.08)       # el small se mueve EN el paso multiscale
+    # baseline no tiene fila anterior
+    assert all(v is None for v in table[0]["deltas_prev"].values())
+
+
+# =====================================================================
+# Fase 2 — Boundary AP (gate ②): mide calidad de borde
+# =====================================================================
+
+from cardd.evaluation.boundary_eval import boundary_iou, mask_to_boundary  # noqa: E402
+
+
+def _dense_iou(a: np.ndarray, b: np.ndarray) -> float:
+    inter = int(np.count_nonzero(a & b))
+    union = int(np.count_nonzero(a | b))
+    return inter / union if union else 0.0
+
+
+def test_mask_to_boundary_is_a_ring():
+    """La banda de borde es no vacía en el contorno y vacía en el interior profundo."""
+    m = np.zeros((40, 40), np.uint8)
+    m[8:32, 8:32] = 1
+    b = mask_to_boundary(m)
+    assert b[20, 20] == 0          # centro: interior, fuera de la banda
+    assert b[8, 20] == 1           # borde superior: dentro de la banda
+    assert np.count_nonzero(b) > 0
+
+
+def test_boundary_iou_identical_and_stricter_than_mask():
+    """Idénticas -> 1.0; ante un corrimiento, boundary IoU castiga más que el de máscara."""
+    gt = np.zeros((60, 60), np.uint8)
+    gt[15:45, 15:45] = 1           # objeto grande (30x30)
+    assert boundary_iou(gt, gt) == pytest.approx(1.0)
+
+    dt = np.zeros((60, 60), np.uint8)
+    dt[17:47, 17:47] = 1           # mismo tamaño, corrido 2px
+    b_iou = boundary_iou(gt, dt)
+    m_iou = _dense_iou(gt, dt)
+    assert 0.0 < b_iou < 1.0
+    assert b_iou < m_iou, f"boundary={b_iou} debería ser más estricto que mask={m_iou}"
+
+
+def _coco_from_masks(tmp_path, objects):
+    """objects: lista de (image_id, cat_id, mask 2D). Devuelve COCO GT."""
+    sizes = {}
+    anns, used_imgs = [], {}
+    for aid, (img_id, cat_id, m) in enumerate(objects, start=1):
+        h, w = m.shape
+        used_imgs[img_id] = (h, w)
+        rle = mask_utils.encode(np.asfortranarray(m.astype(np.uint8)))
+        anns.append({
+            "id": aid, "image_id": img_id, "category_id": cat_id,
+            "bbox": list(map(float, mask_utils.toBbox(rle))),
+            "area": float(mask_utils.area(rle)), "iscrowd": 0,
+            "segmentation": {"counts": rle["counts"].decode("ascii"), "size": rle["size"]},
+        })
+    images = [{"id": i, "height": hw[0], "width": hw[1], "file_name": f"{i}.png"}
+              for i, hw in used_imgs.items()]
+    gt = {"images": images, "categories": [{"id": 3, "name": "dent"}], "annotations": anns}
+    path = tmp_path / "gtb.json"
+    path.write_text(json.dumps(gt))
+    return COCO(str(path))
+
+
+def test_boundary_ap_below_mask_ap_on_degraded_border(tmp_path):
+    """El punto de la métrica: una predicción con buen solape de bulto pero
+    borde degradado mantiene mask_AP alto y baja mask_boundary_AP."""
+    gt_mask = np.zeros((80, 80), np.uint8)
+    gt_mask[20:60, 20:60] = 1                      # objeto grande (40x40)
+    coco_gt = _coco_from_masks(tmp_path, [(1, 3, gt_mask)])
+
+    # predicción = GT erosionado 2px: solape de bulto alto, borde peor
+    eroded = mask_to_boundary  # noqa: F841  (solo para claridad del intent)
+    import cv2
+    pred_mask = cv2.erode(gt_mask, np.ones((3, 3), np.uint8), iterations=2)
+
+    preds = [{
+        "boxes": np.array([[20, 20, 60, 60]], np.float32),
+        "scores": np.array([1.0], np.float32),
+        "labels": np.array([1], np.int64),          # label 1 -> category_id 3
+        "masks": pred_mask[None].astype(np.float32),
+    }]
+    results = predictions_to_coco_results(preds, [1], {1: 3})
+    c5 = evaluate(coco_gt, results, {3: "dent"})
+
+    assert c5["mask_AP"] > 0.5, f"mask_AP={c5['mask_AP']}"
+    assert c5["mask_boundary_AP"] < c5["mask_AP"], (
+        f"boundary={c5['mask_boundary_AP']} debería caer bajo mask={c5['mask_AP']}"
+    )

@@ -106,13 +106,10 @@ def _maskrcnn_pointrend():
     from torchvision.models.detection.backbone_utils import _resnet_fpn_extractor
     from torchvision.models.resnet import resnet18
     from cardd.models.heads.pointrend import PointRendMaskHead, PointRendMaskPredictor
-
     backbone = _resnet_fpn_extractor(resnet18(weights=None), trainable_layers=5)
-    model = MaskRCNN(
-        backbone, num_classes=7,
-        mask_head=PointRendMaskHead(in_channels=256),
-        mask_predictor=PointRendMaskPredictor(in_channels=256, num_classes=7),
-    )
+    model = MaskRCNN(backbone, num_classes=7)
+    model.roi_heads.mask_head = PointRendMaskHead(in_channels=256)
+    model.roi_heads.mask_predictor = PointRendMaskPredictor(in_channels=256, num_classes=7)
     return model
 
 

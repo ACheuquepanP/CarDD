@@ -55,6 +55,7 @@ def point_sample(input: torch.Tensor, point_coords: torch.Tensor, **kwargs) -> t
     if point_coords.dim() == 3:
         add_dim = True
         point_coords = point_coords.unsqueeze(2)        # [N, P, 1, 2]
+    kwargs.pop("align_corners", None)  # fijamos align_corners abajo; evitamos duplicado
     output = F.grid_sample(input, 2.0 * point_coords - 1.0, align_corners=False, **kwargs)
     if add_dim:
         output = output.squeeze(3)                      # [N, C, P]

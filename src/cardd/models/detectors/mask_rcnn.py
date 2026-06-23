@@ -128,18 +128,41 @@ class CarddMaskRCNN(MaskRCNN):
         super().__init__(backbone, **kwargs)
 
 
+def _register_pluggable_modules() -> None:
+    """Import perezoso (convención de D · data/build.py): fuerza el registro de los
+    módulos enchufables (C3) antes de resolver por nombre.
+
+    A nivel de función, no de módulo, para evitar imports circulares (los
+    detectores de C heredan de ``CarddMaskRCNN``). Cada subpaquete expone sus
+    módulos desde su ``__init__`` (lo cablea su dueño: M en ``detectors/``, C en
+    ``necks/``/``heads/``/``losses/``). Un nombre nuevo no obliga a tocar esto.
+    """
+    import importlib
+
+    for pkg in (
+        "cardd.models.detectors",
+        "cardd.models.necks",
+        "cardd.models.heads",
+        "cardd.models.losses",
+    ):
+        try:
+            importlib.import_module(pkg)
+        except ModuleNotFoundError:
+            pass  # subpaquete aún no creado (necks/losses antes de Fase 5/B)
+
+
 def build_detector(cfg) -> nn.Module:
     """Punto de entrada único: despacha por ``model.detector.name`` vía DETECTORS.
 
-    Usa ``DETECTORS.get(name) -> clase`` y la instancia con la config completa.
-    No usamos ``DETECTORS.build(spec, cfg=cfg)`` porque el primer parámetro de
-    ``Registry.build`` ya se llama ``cfg`` y colisionaría con el kwarg. Un swap
-    de detector (a4_cascade) es solo cambiar el nombre; C registra su clase en
-    ``DETECTORS`` con la misma firma ``__init__(self, cfg, **overrides)``.
+    Antes de resolver, fuerza el registro de los módulos enchufables (import
+    perezoso, igual que ``data/build.py``), de modo que los nombres de C
+    (``mask_rcnn_focal``, ``cascade_mask_rcnn``, ...) se descubran solos sin
+    editar este archivo. Usa ``DETECTORS.get`` (no ``build``) porque el primer
+    parámetro de ``Registry.build`` se llama ``cfg`` y colisionaría.
     """
+    _register_pluggable_modules()
     det_name = get(cfg, "model.detector.name", "mask_rcnn")
-    det_cls = DETECTORS.get(det_name)
-    return det_cls(cfg)
+    return DETECTORS.get(det_name)(cfg)
 
 
 if __name__ == "__main__":
@@ -161,7 +184,9 @@ if __name__ == "__main__":
         },
     }
 
-    model = build_detector(cfg)
+    # Instanciamos la clase directo (no build_detector): correr este archivo como
+    # script re-importaría el subpaquete y @register se quejaría de doble registro.
+    model = CarddMaskRCNN(cfg)
 
     # un "batch" C1: lista de imágenes en [0,1], sin apilar (collate de D)
     images = [torch.rand(3, 480, 640), torch.rand(3, 512, 512)]
