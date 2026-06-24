@@ -1,1 +1,22 @@
-# CarDD · configs/ablation/a2_focal_multiscale.yaml · Estado: Pendiente
+# CarDD · configs/ablation/a2_focal_multiscale.yaml
+# Fila a2 (Equipo C, Fase 5) · Contrato C4·C3
+#
+# Multi-scale AISLADO (Gate ③: aislada; un cambio sobre a0). Gate ① cerrado con
+# D: Opción B -> el ÚNICO reescalado vive en el modelo. El knob real (verificado
+# en mask_rcnn.py de M, línea 113) es `data.image_min_size`, que pasa de escalar
+# (640 en base) a LISTA. torchvision muestrea una escala/iteración en train; en
+# EVAL usa el ÚLTIMO valor (704) -> a2 evalúa single-scale al tope.
+#
+# IMPORTANTE (D): NO referenciar `multiscale` en data.transforms -> doble resize.
+# El lado de datos en a2 es idéntico a a0. max_size se hereda de base (1024).
+#
+# Escalas centradas en S=640, espaciadas ~64 px. El tope (704) debe validarse con
+# un smoke de VRAM en 8 GB; si no entra, usar [448, 512, 576, 640] (tope = S).
+#
+# ⚠️ DEPENDE DE M: mask_rcnn.py hace `int(get(cfg,"data.image_min_size"))` (l.113),
+# que fuerza escalar y REVIENTA con lista. M debe aceptar lista (sacar el int() y
+# pasarla al GeneralizedRCNNTransform). Sin ese cambio, a2 no corre. Coordinado.
+_base_: a0_baseline.yaml
+
+data:
+  image_min_size: [512, 576, 640, 704]
