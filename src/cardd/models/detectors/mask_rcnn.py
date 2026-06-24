@@ -108,9 +108,13 @@ class CarddMaskRCNN(MaskRCNN):
         num_classes = int(get(cfg, "data.num_classes")) + 1
 
         # --- transform: normaliza acá (D entrega [0,1]); todo desde data.* ---
+        # image_min_size acepta escalar (a0 y demás filas) o lista (a2 multi-scale):
+        # GeneralizedRCNNTransform muestrea una por iteración en train y usa la última en eval.
+        _ms = get(cfg, "data.image_min_size")
+        min_size = tuple(_ms) if isinstance(_ms, (list, tuple)) else int(_ms)
         kwargs = dict(
             num_classes=num_classes,
-            min_size=int(get(cfg, "data.image_min_size")),
+            min_size=min_size,
             max_size=int(get(cfg, "data.image_max_size")),
             image_mean=list(get(cfg, "data.image_mean")),
             image_std=list(get(cfg, "data.image_std")),
