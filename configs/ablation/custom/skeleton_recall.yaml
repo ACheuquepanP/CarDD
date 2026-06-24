@@ -1,0 +1,13 @@
+# CarDD · configs/ablation/custom/skeleton_recall.yaml
+# Fila custom §5.2 (Equipo C, Fase B) · Contrato C4·C3
+# Delta sobre a0: detector con término Skeleton Recall sumado al loss de máscara
+# (clave aparte loss_mask_skeleton). Un cambio por fila. C2 intacto.
+_base_: ../a0_baseline.yaml
+
+model:
+  detector:
+    name: mask_rcnn_skeleton
+    skeleton:
+      weight: 1.0     # peso del término
+      iters: 3        # iteraciones de skeletonización del GT
+      tube: true      # entubar el esqueleto (confinado al GT)
