@@ -1,0 +1,13 @@
+# CarDD · configs/ablation/custom/composed_focal_cldice.yaml
+# Fila combinada §5.2 (Equipo C, Fase B) · Contrato C4·C3
+# Combina dos loss-mods por YAML (sin código nuevo): focal (clasificación) +
+# clDice (máscara). Para definir más combinadas: agregar/quitar de la lista.
+# Orden = orden de aplicación (entre sitios distintos no importa).
+_base_: ../a0_baseline.yaml
+
+model:
+  detector:
+    name: mask_rcnn_composed
+    loss_mods:
+      - {name: focal, alpha: 0.5, gamma: 2.0}   # sitio clasificación (reemplaza)
+      - {name: cldice, weight: 1.0, iters: 3}   # sitio máscara (suma loss_mask_cldice)
