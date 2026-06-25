@@ -76,6 +76,7 @@ class Trainer:
         self.amp = bool(get(cfg, "train.amp", True)) and self.device.type == "cuda"
         self.log_interval = int(get(cfg, "train.log_interval", 10))
         self.grad_clip = get(cfg, "train.grad_clip", None)
+        self.ckpt_interval = int(get(cfg, "train.ckpt_interval", 0))  # 0 = solo last.pth al final
         self.out_dir = Path(get(cfg, "output.dir", "outputs/run"))
         self.out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -101,10 +102,13 @@ class Trainer:
             "entrenando: %d epochs · ~%d opt-steps · accum=%d · amp=%s · device=%s",
             self.epochs, self.total_steps, self.accum, self.amp, self.device,
         )
-        last = None
         for epoch in range(self.epochs):
             self._run_epoch(epoch)
-            last = self.save_checkpoint(epoch)
+            # guardado periódico opcional (ckpt_interval=0 → solo al final): evita
+            # llenar el disco y frenar el loop con un checkpoint por epoch.
+            if self.ckpt_interval and (epoch + 1) % self.ckpt_interval == 0:
+                self.save_checkpoint(epoch, numbered=True)
+        last = self.save_checkpoint(self.epochs - 1)
         self.tb.close()
         return last
 
@@ -143,7 +147,7 @@ class Trainer:
                         self.tb.add_scalar(f"train/{k}", float(v.detach()), self.step)
                     self.tb.add_scalar("train/lr", lr, self.step)
 
-    def save_checkpoint(self, epoch: int) -> Path:
+    def save_checkpoint(self, epoch: int, numbered: bool = False) -> Path:
         payload = {
             "model": self.model.state_dict(),
             "optimizer": self.optimizer.state_dict(),
@@ -151,11 +155,12 @@ class Trainer:
             "step": self.step,
             "cfg": self.cfg,
         }
-        path = self.out_dir / f"checkpoint_epoch{epoch:03d}.pth"
-        torch.save(payload, path)
-        torch.save(payload, self.out_dir / "last.pth")  # alias estable para evaluate/inference
-        self.log.info("checkpoint guardado: %s", path)
-        return path
+        last = self.out_dir / "last.pth"
+        torch.save(payload, last)                       # alias estable para evaluate/inference
+        if numbered:
+            torch.save(payload, self.out_dir / f"checkpoint_epoch{epoch:03d}.pth")
+        self.log.info("checkpoint guardado (epoch %d) → %s", epoch, last)
+        return last
 
 
 if __name__ == "__main__":

@@ -15,6 +15,7 @@ from __future__ import annotations
 import argparse
 
 import torch
+from torch.utils.data import DataLoader, Subset
 
 from cardd.utils.config import load_config, get
 from cardd.utils.seed import set_seed
@@ -25,31 +26,46 @@ from cardd.engine.trainer import Trainer
 from cardd.engine.inference import _load_weights
 
 
-def _materialize_overfit(loader, n: int, log):
-    """Junta los primeros >= n imágenes en una lista de batches en memoria.
+def _force_eval_transforms(cfg, log) -> None:
+    """Overfit: usar los transforms de eval (sin augmentation) para que el modelo
+    pueda MEMORIZAR las imágenes y para que train/eval vean el mismo preprocesamiento.
+    Guardado contra estructuras de config distintas (si no encuentra el bloque, no toca)."""
+    t = cfg.get("data", {}).get("transforms")
+    if isinstance(t, dict) and "eval" in t:
+        t["train"] = t["eval"]
+        log.info("overfit: train usa transforms de eval (sin augmentation)")
 
-    Devolver una lista (no un DataLoader) permite repetir el mismo subconjunto
-    muchas epochs sin volver a leer disco. El Trainer solo necesita un iterable
-    con ``len()``, así que una lista de ``(tuple(images), tuple(targets))`` sirve.
+
+def _overfit_loader(base_loader, n: int, log):
+    """Loader DETERMINISTA de las primeras n imágenes (índices 0..n-1, sin shuffle).
+
+    Idéntico al subconjunto que arma evaluate.py → el smoke evalúa EXACTAMENTE lo
+    que entrenó, sin depender del RNG ni del shuffle. Se materializa en memoria
+    (frozen) para repetir el mismo subconjunto muchas epochs sin releer disco.
     """
-    batches, count = [], 0
-    for images, targets in loader:
-        batches.append((images, targets))
-        count += len(images)
-        if count >= n:
-            break
-    log.info("overfit: %d imágenes en %d batches (se repiten cada epoch)", count, len(batches))
-    return batches
+    ds = base_loader.dataset
+    n = min(n, len(ds))
+    loader = DataLoader(
+        Subset(ds, list(range(n))),
+        batch_size=base_loader.batch_size or 1,
+        shuffle=False,
+        num_workers=0,
+        collate_fn=base_loader.collate_fn,
+    )
+    log.info("overfit: %d imágenes deterministas (índices 0..%d)", n, n - 1)
+    return list(loader)
 
 
 def _tune_cfg_for_overfit(cfg, n_batches: int, target_steps: int, log) -> None:
-    """Sube las epochs para alcanzar ~target_steps y fija lr constante."""
-    accum = max(1, int(get(cfg, "train.grad_accum_steps", 1)))
-    steps_per_epoch = max(1, -(-n_batches // accum))  # ceil
-    epochs = max(int(get(cfg, "train.max_epochs", 1)), -(-target_steps // steps_per_epoch))
-    cfg.setdefault("train", {})["max_epochs"] = epochs
-    cfg.setdefault("optim", {})["scheduler"] = "none"  # sin coseno: el loss baja a 0 más rápido
-    log.info("overfit: %d epochs (~%d opt-steps) · scheduler=none", epochs, epochs * steps_per_epoch)
+    """Para sobreajustar rápido: paso por batch (accum=1), lr constante, y epochs
+    suficientes para ~target_steps."""
+    cfg.setdefault("train", {})["grad_accum_steps"] = 1
+    cfg["optim"] = {**cfg.get("optim", {}), "scheduler": "none"}
+    steps_per_epoch = max(1, n_batches)  # accum=1 → un step por batch
+    epochs = max(1, -(-target_steps // steps_per_epoch))  # ceil
+    cfg["train"]["max_epochs"] = epochs
+    log.info("overfit: accum=1 · %d epochs (~%d opt-steps) · scheduler=none",
+             epochs, epochs * steps_per_epoch)
 
 
 def main() -> None:
@@ -64,10 +80,14 @@ def main() -> None:
     set_seed(int(get(cfg, "seed", 0)))
     log = get_logger("cardd.train")
 
-    train_loader = build_dataloader(cfg, "train")
     if args.overfit:
-        train_loader = _materialize_overfit(train_loader, args.overfit, log)
+        _force_eval_transforms(cfg, log)          # sin aug, antes de construir el loader
+    base = build_dataloader(cfg, "train")
+    if args.overfit:
+        train_loader = _overfit_loader(base, args.overfit, log)
         _tune_cfg_for_overfit(cfg, len(train_loader), target_steps=300, log=log)
+    else:
+        train_loader = base
 
     model = build_detector(cfg)
     if args.resume:
