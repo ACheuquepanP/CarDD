@@ -145,7 +145,7 @@ def _register_pluggable_modules() -> None:
 
     for pkg in (
         "cardd.models.detectors",
-        "cardd.models.necks",
+        "cardd.models.modules",  # necks enchufables (dsconv, ema_attention) viven acá
         "cardd.models.heads",
         "cardd.models.losses",
     ):
