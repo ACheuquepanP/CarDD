@@ -71,7 +71,7 @@ class Trainer:
         self.model = model.to(self.device)
         self.loader = train_loader
 
-        self.epochs = int(get(cfg, "train.max_epochs", 1))
+        self.epochs = int(get(cfg, "train.epochs", 1))
         self.accum = max(1, int(get(cfg, "train.grad_accum_steps", 1)))
         self.amp = bool(get(cfg, "train.amp", True)) and self.device.type == "cuda"
         self.log_interval = int(get(cfg, "train.log_interval", 10))
@@ -177,7 +177,7 @@ if __name__ == "__main__":
             "detector": {"name": "mask_rcnn"},
             "backbone": {"name": "convnextv2_tiny", "pretrained": False},
         },
-        "train": {"device": "cpu", "max_epochs": 1, "grad_accum_steps": 2,
+        "train": {"device": "cpu", "epochs": 1, "grad_accum_steps": 2,
                   "amp": False, "log_interval": 1},
         "output": {"dir": "outputs/_smoke"},
         "optim": {"name": "adamw", "lr": 1e-4, "scheduler": "none"},

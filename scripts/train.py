@@ -63,7 +63,7 @@ def _tune_cfg_for_overfit(cfg, n_batches: int, target_steps: int, log) -> None:
     cfg["optim"] = {**cfg.get("optim", {}), "scheduler": "none"}
     steps_per_epoch = max(1, n_batches)  # accum=1 → un step por batch
     epochs = max(1, -(-target_steps // steps_per_epoch))  # ceil
-    cfg["train"]["max_epochs"] = epochs
+    cfg["train"]["epochs"] = epochs
     log.info("overfit: accum=1 · %d epochs (~%d opt-steps) · scheduler=none",
              epochs, epochs * steps_per_epoch)
 
