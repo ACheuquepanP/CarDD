@@ -94,6 +94,46 @@ def run_inference(
     return predictions, image_ids
 
 
+@torch.no_grad()
+def run_inference_coco_results(
+    model: nn.Module,
+    dataloader,
+    dataset,
+    device: str | torch.device = "cuda",
+    amp: bool = True,
+):
+    """Inferencia **memory-safe**: serializa cada imagen a COCO-results (RLE) en el
+    momento y suelta la máscara densa por iteración. Devuelve ``(coco_results, image_ids)``.
+
+    A diferencia de ``run_inference`` (que acumula las predicciones C2 DENSAS de
+    todo el split en RAM y puede dar OOM en val/test completos), aquí solo se
+    acumulan los dicts compactos. ``dataset`` debe exponer ``cat_id_to_label`` (C1)
+    para el mapa ``label→category_id``. La serialización es la de E
+    (``predictions_to_coco_results``); este es el único loop de inferencia que
+    debería usarse para evaluar splits grandes (val en loop, evaluate.py).
+    """
+    from cardd.evaluation.coco_eval import predictions_to_coco_results
+
+    device = torch.device(device)
+    model.eval()
+    use_amp = amp and device.type == "cuda"
+    label_to_cat_id = {label: cid for cid, label in dataset.cat_id_to_label.items()}
+
+    coco_results: list[dict] = []
+    image_ids: list[int] = []
+    for images, targets in dataloader:
+        images = [img.to(device, non_blocking=True) for img in images]
+        with torch.autocast(device_type=device.type, enabled=use_amp):
+            outputs = model(images)
+        for out, tgt in zip(outputs, targets):
+            iid = int(tgt["image_id"])
+            pred = {k: v.detach().cpu() for k, v in out.items()}   # densa, de UNA imagen
+            coco_results.extend(predictions_to_coco_results([pred], [iid], label_to_cat_id))
+            image_ids.append(iid)
+            # `pred` (incluida la máscara densa) se libera al pasar de iteración
+    return coco_results, image_ids
+
+
 if __name__ == "__main__":
     # Smoke sin dataset ni pesos: confirma que la costura arma un modelo eval que produce C2.
     cfg = {

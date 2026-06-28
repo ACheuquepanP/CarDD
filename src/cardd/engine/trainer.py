@@ -57,28 +57,36 @@ def build_scheduler(cfg, optimizer, total_steps: int):
 
 
 class Trainer:
-    """Encapsula el loop. Se construye con ``(cfg, model, train_loader)``.
+    """Encapsula el loop. Se construye con ``(cfg, model, train_loader, val_loader=None)``.
 
     El ``train_loader`` viene de ``data.build.build_dataloader`` (D), con el
     collate que entrega ``(tuple(images), tuple(targets))`` — justo lo que espera
     ``MaskRCNN.forward``.
+
+    Protocolo train/val/test: si se pasa ``val_loader``, cada ``train.val_interval``
+    epochs se evalúa val SIN gradiente (el modelo nunca entrena sobre val) y se
+    guarda ``best.pth`` con el mayor ``mask_AP`` de val. ``test`` no participa acá:
+    C lo evalúa al cierre con ``best.pth`` (set no visto).
     """
 
-    def __init__(self, cfg, model: nn.Module, train_loader) -> None:
+    def __init__(self, cfg, model: nn.Module, train_loader, val_loader=None) -> None:
         self.cfg = cfg
         self.log = get_logger("cardd.engine.trainer")
         self.device = torch.device(get(cfg, "train.device", "cuda"))
         self.model = model.to(self.device)
         self.loader = train_loader
+        self.val_loader = val_loader
 
         self.epochs = int(get(cfg, "train.epochs", 1))
         self.accum = max(1, int(get(cfg, "train.grad_accum_steps", 1)))
         self.amp = bool(get(cfg, "train.amp", True)) and self.device.type == "cuda"
         self.log_interval = int(get(cfg, "train.log_interval", 10))
+        self.val_interval = max(1, int(get(cfg, "train.val_interval", 1)))
         self.grad_clip = get(cfg, "train.grad_clip", None)
         self.ckpt_interval = int(get(cfg, "train.ckpt_interval", 0))  # 0 = solo last.pth al final
         self.out_dir = Path(get(cfg, "output.dir", "outputs/run"))
         self.out_dir.mkdir(parents=True, exist_ok=True)
+        self.best_metric = float("-inf")
 
         steps_per_epoch = max(1, math.ceil(len(self.loader) / self.accum))
         self.total_steps = steps_per_epoch * self.epochs
@@ -104,8 +112,16 @@ class Trainer:
         )
         for epoch in range(self.epochs):
             self._run_epoch(epoch)
-            # guardado periódico opcional (ckpt_interval=0 → solo al final): evita
-            # llenar el disco y frenar el loop con un checkpoint por epoch.
+
+            # validación SIN gradiente + selección de best.pth por mask_AP de val
+            if self.val_loader is not None and (epoch + 1) % self.val_interval == 0:
+                val_ap = self._validate(epoch)
+                if val_ap > self.best_metric:
+                    self.best_metric = val_ap
+                    self._save(self.out_dir / "best.pth", epoch)
+                    self.log.info("nuevo best.pth · val mask_AP=%.4f (epoch %d)", val_ap, epoch)
+
+            # guardado periódico opcional (ckpt_interval=0 → solo al final)
             if self.ckpt_interval and (epoch + 1) % self.ckpt_interval == 0:
                 self.save_checkpoint(epoch, numbered=True)
         last = self.save_checkpoint(self.epochs - 1)
@@ -147,18 +163,57 @@ class Trainer:
                         self.tb.add_scalar(f"train/{k}", float(v.detach()), self.step)
                     self.tb.add_scalar("train/lr", lr, self.step)
 
-    def save_checkpoint(self, epoch: int, numbered: bool = False) -> Path:
-        payload = {
-            "model": self.model.state_dict(),
-            "optimizer": self.optimizer.state_dict(),
-            "epoch": epoch,
-            "step": self.step,
-            "cfg": self.cfg,
+    @torch.no_grad()
+    def _validate(self, epoch: int) -> float:
+        """Evalúa val SIN gradiente y devuelve mask_AP. No toca los pesos.
+
+        Usa el loop **memory-safe** (serializa a RLE por imagen, no acumula
+        máscaras densas) → no hay OOM en val completa. Corre el evaluador de E
+        con ``with_boundary=False`` (val más rápida; el Boundary AP es para el
+        cierre, no para seleccionar best.pth) y ``image_ids`` = todas las inferidas
+        (incluye las vacías como recall miss).
+        """
+        from cardd.engine.inference import run_inference_coco_results
+        from cardd.evaluation.coco_eval import evaluate
+
+        ds = self.val_loader.dataset
+        cat_id_to_name = {
+            cid: ds.label_to_name[label] for cid, label in ds.cat_id_to_label.items()
         }
-        last = self.out_dir / "last.pth"
-        torch.save(payload, last)                       # alias estable para evaluate/inference
+
+        self.model.eval()
+        coco_results, image_ids = run_inference_coco_results(
+            self.model, self.val_loader, ds, device=self.device, amp=self.amp)
+        self.model.train()
+
+        c5 = evaluate(ds.coco, coco_results, cat_id_to_name,
+                      image_ids=image_ids, with_boundary=False)
+
+        val_ap = float(c5.get("mask_AP", float("nan")))
+        box_ap = float(c5.get("box_AP", float("nan")))
+        self.log.info("val · epoch %d · mask_AP=%.4f · box_AP=%.4f", epoch, val_ap, box_ap)
+        self.tb.add_scalar("val/mask_AP", val_ap, self.step)
+        self.tb.add_scalar("val/box_AP", box_ap, self.step)
+        return val_ap
+
+    def _save(self, path: Path, epoch: int) -> Path:
+        torch.save(
+            {
+                "model": self.model.state_dict(),
+                "optimizer": self.optimizer.state_dict(),
+                "epoch": epoch,
+                "step": self.step,
+                "best_metric": self.best_metric,
+                "cfg": self.cfg,
+            },
+            path,
+        )
+        return path
+
+    def save_checkpoint(self, epoch: int, numbered: bool = False) -> Path:
+        last = self._save(self.out_dir / "last.pth", epoch)  # alias estable para evaluate/inference
         if numbered:
-            torch.save(payload, self.out_dir / f"checkpoint_epoch{epoch:03d}.pth")
+            self._save(self.out_dir / f"checkpoint_epoch{epoch:03d}.pth", epoch)
         self.log.info("checkpoint guardado (epoch %d) → %s", epoch, last)
         return last
 
