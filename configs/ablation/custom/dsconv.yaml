@@ -6,5 +6,7 @@ _base_: ../a0_baseline.yaml
 model:
   neck:
     name: dsconv
-    kernel_size: 9
+    kernel_size: 4
     extend_scope: 1.0
+output:
+  dir: outputs/dsconv

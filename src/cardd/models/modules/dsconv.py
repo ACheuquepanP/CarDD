@@ -24,6 +24,7 @@ from collections import OrderedDict
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.utils.checkpoint import checkpoint
 from einops import rearrange
 
 from cardd.utils.registry import NECKS
@@ -98,8 +99,18 @@ class DynamicSnakeConv(nn.Module):
         offset = torch.tanh(self.offset_bn(self.offset_conv(x)))      # [B,K,H,W]
         grids = build_snake_grids(offset, H, W, self.morph, self.extend_scope)
         sampled = [F.grid_sample(x, g, align_corners=True, padding_mode="border") for g in grids]
-        feat = rearrange(torch.stack(sampled, dim=-1), "b c h w k -> b (c k) h w")
-        return F.relu(self.gn(self.aggregate(feat)))
+        # `aggregate` es Conv2d(C*K -> out, 1x1). Convolucionar el stack concatenado
+        # equivale a sumar K convoluciones 1x1, una por punto sampleado, SIN materializar
+        # el tensor [B, C*K, H, W] (que con K=9 era el pico que reventaba la VRAM).
+        # Equivalencia exacta (validada): pico de memoria pasa de C*K a C.
+        w = self.aggregate.weight                                  # [out, C*K, 1, 1]
+        if self.aggregate.bias is not None:
+            out = self.aggregate.bias.view(1, -1, 1, 1).expand(B, -1, H, W).clone()
+        else:
+            out = x.new_zeros(B, w.shape[0], H, W)
+        for i, s in enumerate(sampled):
+            out = out + F.conv2d(s, w[:, i * C:(i + 1) * C])       # rebanada del peso del punto i
+        return F.relu(self.gn(out))
 
 
 @NECKS.register("dsconv")
@@ -129,13 +140,23 @@ class DSConvNeck(nn.Module):
         })
 
     def forward(self, feats: "OrderedDict[str, torch.Tensor]") -> "OrderedDict[str, torch.Tensor]":
+        # Gradient checkpointing en las ramas DSConv: en el forward NO se guardan las
+        # activaciones internas (grid_sample × kernel × 2 ramas × niveles, el pico que
+        # llena la VRAM); se recalculan en el backward. Cambia memoria por cómputo;
+        # numéricamente idéntico. Solo se activa en training con grad: en val/eval
+        # (sin backward) el checkpoint no aplica y se llama la rama directo.
+        use_ckpt = self.training and torch.is_grad_enabled()
         out: "OrderedDict[str, torch.Tensor]" = OrderedDict()
         for k, v in feats.items():
             if k not in self.blocks:
                 out[k] = v
                 continue
-            bx = self.blocks[k]["x"](v)
-            by = self.blocks[k]["y"](v)
+            if use_ckpt:
+                bx = checkpoint(self.blocks[k]["x"], v, use_reentrant=False)
+                by = checkpoint(self.blocks[k]["y"], v, use_reentrant=False)
+            else:
+                bx = self.blocks[k]["x"](v)
+                by = self.blocks[k]["y"](v)
             fused = self.fuse[k](torch.cat([bx, by], dim=1))
             out[k] = v + fused              # residual: no rompe el FPN si los offsets son ~0
         return out
