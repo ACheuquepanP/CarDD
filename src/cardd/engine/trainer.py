@@ -25,23 +25,23 @@ from cardd.utils.logging import get_logger
 
 
 def build_optimizer(cfg, model: nn.Module) -> torch.optim.Optimizer:
-    name = str(get(cfg, "optim.name", "adamw")).lower()
-    lr = float(get(cfg, "optim.lr", 1e-4))
-    wd = float(get(cfg, "optim.weight_decay", 0.05))
+    name = str(get(cfg, "train.optimizer.name", "adamw")).lower()
+    lr = float(get(cfg, "train.optimizer.lr", 1e-4))
+    wd = float(get(cfg, "train.optimizer.weight_decay", 0.05))
     params = [p for p in model.parameters() if p.requires_grad]
     if name == "adamw":
         return torch.optim.AdamW(params, lr=lr, weight_decay=wd)
     if name == "sgd":
-        mom = float(get(cfg, "optim.momentum", 0.9))
+        mom = float(get(cfg, "train.optimizer.momentum", 0.9))
         return torch.optim.SGD(params, lr=lr, momentum=mom, weight_decay=wd)
     raise ValueError(f"optimizer {name!r} no soportado")
 
 
 def build_scheduler(cfg, optimizer, total_steps: int):
-    sched = get(cfg, "optim.scheduler", "cosine")
+    sched = get(cfg, "train.scheduler.name", "cosine")
     if not sched or str(sched).lower() == "none":
         return None  # lr constante (útil para el overfit smoke: loss→0 rápido)
-    warmup = int(get(cfg, "optim.warmup_iters", 0))
+    warmup = int(get(cfg, "train.scheduler.warmup_steps", 0))
     if str(sched).lower() == "cosine":
         parts, milestones = [], []
         if warmup > 0:
@@ -88,6 +88,13 @@ class Trainer:
         self.out_dir.mkdir(parents=True, exist_ok=True)
         self.best_metric = float("-inf")
 
+        # early stopping OPCIONAL (default OFF → schedule fijo, no afecta la ablación)
+        es = "train.early_stopping"
+        self.es_enabled = bool(get(cfg, f"{es}.enabled", False))
+        self.es_patience = max(1, int(get(cfg, f"{es}.patience", 3)))
+        self.es_min_delta = float(get(cfg, f"{es}.min_delta", 0.0))
+        self.es_counter = 0
+
         steps_per_epoch = max(1, math.ceil(len(self.loader) / self.accum))
         self.total_steps = steps_per_epoch * self.epochs
         self.optimizer = build_optimizer(cfg, self.model)
@@ -110,21 +117,39 @@ class Trainer:
             "entrenando: %d epochs · ~%d opt-steps · accum=%d · amp=%s · device=%s",
             self.epochs, self.total_steps, self.accum, self.amp, self.device,
         )
+        # log de valores RESUELTOS: si una clave de base no matchea y cae a default,
+        # se ve acá (no se enmascara como pasó con optim.* vs train.optimizer.*).
+        self.log.info(
+            "optimizer=%s · lr=%.2e · scheduler=%s",
+            type(self.optimizer).__name__,
+            self.optimizer.param_groups[0]["lr"],
+            get(self.cfg, "train.scheduler.name", "cosine"),
+        )
+        last_epoch = 0
         for epoch in range(self.epochs):
             self._run_epoch(epoch)
+            last_epoch = epoch
 
             # validación SIN gradiente + selección de best.pth por mask_AP de val
             if self.val_loader is not None and (epoch + 1) % self.val_interval == 0:
                 val_ap = self._validate(epoch)
+                improved = val_ap > self.best_metric + self.es_min_delta
                 if val_ap > self.best_metric:
                     self.best_metric = val_ap
                     self._save(self.out_dir / "best.pth", epoch)
                     self.log.info("nuevo best.pth · val mask_AP=%.4f (epoch %d)", val_ap, epoch)
+                # early stopping OPCIONAL (default OFF: no corta, best.pth ya queda guardado)
+                if self.es_enabled:
+                    self.es_counter = 0 if improved else self.es_counter + 1
+                    if self.es_counter >= self.es_patience:
+                        self.log.info("early stopping en epoch %d (%d vals sin mejora > %.4g)",
+                                      epoch, self.es_patience, self.es_min_delta)
+                        break
 
             # guardado periódico opcional (ckpt_interval=0 → solo al final)
             if self.ckpt_interval and (epoch + 1) % self.ckpt_interval == 0:
                 self.save_checkpoint(epoch, numbered=True)
-        last = self.save_checkpoint(self.epochs - 1)
+        last = self.save_checkpoint(last_epoch)
         self.tb.close()
         return last
 
@@ -233,9 +258,10 @@ if __name__ == "__main__":
             "backbone": {"name": "convnextv2_tiny", "pretrained": False},
         },
         "train": {"device": "cpu", "epochs": 1, "grad_accum_steps": 2,
-                  "amp": False, "log_interval": 1},
+                  "amp": False, "log_interval": 1,
+                  "optimizer": {"name": "adamw", "lr": 1e-4},
+                  "scheduler": {"name": "none"}},
         "output": {"dir": "outputs/_smoke"},
-        "optim": {"name": "adamw", "lr": 1e-4, "scheduler": "none"},
     }
 
     def _fake_sample():

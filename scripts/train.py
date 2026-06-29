@@ -60,7 +60,7 @@ def _tune_cfg_for_overfit(cfg, n_batches: int, target_steps: int, log) -> None:
     """Para sobreajustar rápido: paso por batch (accum=1), lr constante, y epochs
     suficientes para ~target_steps."""
     cfg.setdefault("train", {})["grad_accum_steps"] = 1
-    cfg["optim"] = {**cfg.get("optim", {}), "scheduler": "none"}
+    cfg["train"]["scheduler"] = {"name": "none"}  # lr constante en overfit
     steps_per_epoch = max(1, n_batches)  # accum=1 → un step por batch
     epochs = max(1, -(-target_steps // steps_per_epoch))  # ceil
     cfg["train"]["epochs"] = epochs
@@ -86,8 +86,10 @@ def main() -> None:
     if args.overfit:
         train_loader = _overfit_loader(base, args.overfit, log)
         _tune_cfg_for_overfit(cfg, len(train_loader), target_steps=300, log=log)
+        val_loader = None  # overfit: la selección best.pth por val no aplica
     else:
         train_loader = base
+        val_loader = build_dataloader(cfg, "val")
 
     model = build_detector(cfg)
     if args.resume:
@@ -95,7 +97,7 @@ def main() -> None:
         _load_weights(model, args.resume, device)
         log.info("pesos cargados desde %s", args.resume)
 
-    ckpt = Trainer(cfg, model, train_loader).train()
+    ckpt = Trainer(cfg, model, train_loader, val_loader).train()
     log.info("listo · checkpoint final: %s", ckpt)
 
 
