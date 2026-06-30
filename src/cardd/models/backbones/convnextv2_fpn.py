@@ -54,6 +54,7 @@ class ConvNeXtV2FPN(nn.Module):
         in_channels: canales de entrada (3 = RGB).
         out_channels: ancho del FPN, compartido por todos los niveles.
         out_indices: qué stages del backbone alimentan el FPN (4 por defecto).
+        drop_path_rate: stochastic depth (regularización ConvNeXt); 0.0 = off.
         checkpoint_path: pesos locales opcionales (tiene prioridad sobre ``pretrained``).
         freeze_backbone: si True, congela todos los parámetros del cuerpo.
     """
@@ -65,6 +66,7 @@ class ConvNeXtV2FPN(nn.Module):
         in_channels: int = 3,
         out_channels: int = 256,
         out_indices: tuple[int, ...] = (0, 1, 2, 3),
+        drop_path_rate: float = 0.0,
         checkpoint_path: str | None = None,
         freeze_backbone: bool = False,
     ) -> None:
@@ -76,6 +78,8 @@ class ConvNeXtV2FPN(nn.Module):
 
         # features_only → el forward del cuerpo devuelve una lista de feature maps,
         # uno por stage en out_indices. in_chans deja entrar imágenes no-RGB si hiciera falta.
+        # drop_path_rate = stochastic depth (regularización de ConvNeXt); solo actúa en
+        # train, identidad en eval. 0.0 = sin regularizar (default, no cambia nada).
         self.body = timm.create_model(
             _TIMM_NAMES[variant],
             pretrained=pretrained and checkpoint_path is None,
@@ -83,6 +87,7 @@ class ConvNeXtV2FPN(nn.Module):
             features_only=True,
             out_indices=out_indices,
             in_chans=in_channels,
+            drop_path_rate=drop_path_rate,
         )
 
         # No hardcodeamos los channels: los leemos del propio modelo, así Tiny/Base/Large
