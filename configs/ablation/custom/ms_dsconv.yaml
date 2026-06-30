@@ -1,0 +1,14 @@
+# CarDD · combo multi_scale + dsconv (Equipo C)
+# Ortogonales: multiscale = data.image_min_size (lista); dsconv = model.neck.
+# Cuelga de a0 (combinada permitida). Escalas centradas en 313 (min base actual).
+_base_: ../a0_baseline.yaml
+data:
+  image_min_size: [265, 313, 361, 409]
+model:
+  neck:
+    name: dsconv
+    levels: ["0", "1", "2", "3", "pool"]
+    kernel_size: 9
+    extend_scope: 1.0
+output:
+  dir: outputs/ms_dsconv

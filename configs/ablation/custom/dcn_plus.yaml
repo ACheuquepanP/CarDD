@@ -1,0 +1,14 @@
+# CarDD · configs/ablation/custom/dcn_plus.yaml
+# Fila custom §5.2 (Equipo C, reevaluación) · Contrato C4·C3
+# Delta sobre a0: neck DCNv2 / "DCN+" (DCNv1 + máscara de modulación por punto)
+# sobre el FPN. La modulación pondera cada muestra -> puede atenuar fondo
+# irrelevante. Contraparte modulada de dsconv. Un cambio por fila.
+_base_: ../a0_baseline.yaml
+model:
+  neck:
+    name: dcn
+    levels: ["0", "1", "2", "3", "pool"]
+    kernel_size: 3
+    modulated: true       # DCNv2 / DCN+
+output:
+  dir: outputs/dcn_plus

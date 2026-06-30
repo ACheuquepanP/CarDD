@@ -1,0 +1,22 @@
+# CarDD · configs/ablation/custom/base_dcnplus_focal_ms.yaml
+# NUEVA BASELINE (reevaluación, alineada al paper CarDD) · Contrato C4·C3
+# Triple combo, los tres en slots distintos -> puro YAML:
+#   - multiscale -> data.image_min_size (lista, centrada en min base 313)
+#   - DCN+       -> model.neck (conv deformable modulada)
+#   - focal      -> loss vía composer (detector mask_rcnn_composed, loss_mods:[focal])
+# Las demás filas de la reevaluación se APILAN sobre esta (heredan con _base_).
+_base_: ../a0_baseline.yaml
+data:
+  image_min_size: [265, 313, 361, 409]
+model:
+  detector:
+    name: mask_rcnn_composed
+    loss_mods:
+      - {name: focal, alpha: 0.5, gamma: 2.0}
+  neck:
+    name: dcn
+    levels: ["0", "1", "2", "3", "pool"]
+    kernel_size: 3
+    modulated: true        # DCN+
+output:
+  dir: outputs/base_dcnplus_focal_ms

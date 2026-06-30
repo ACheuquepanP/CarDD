@@ -1,0 +1,14 @@
+# CarDD · combo cascade + dsconv (Equipo C)
+# cascade = detector (reemplaza RoIHeads); dsconv = neck. Slots distintos.
+# OJO: cascade es el módulo más invasivo -> smoke antes de confiar.
+_base_: ../a0_baseline.yaml
+model:
+  detector:
+    name: cascade_mask_rcnn
+  neck:
+    name: dsconv
+    levels: ["0", "1", "2", "3", "pool"]
+    kernel_size: 9
+    extend_scope: 1.0
+output:
+  dir: outputs/cascade_dsconv

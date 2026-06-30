@@ -1,0 +1,15 @@
+# CarDD · configs/ablation/custom/dcn.yaml
+# Fila custom §5.2 (Equipo C, reevaluación) · Contrato C4·C3
+# Delta sobre a0: neck DCNv1 (conv deformable, offsets libres) sobre el FPN.
+# Contraparte de dsconv: misma ubicación/patrón residual, pero SIN el sesgo
+# tubular de la serpiente -> referencia para medir si la restricción de DSConv
+# ayuda o estorba. Un cambio por fila.
+_base_: ../a0_baseline.yaml
+model:
+  neck:
+    name: dcn
+    levels: ["0", "1", "2", "3", "pool"]
+    kernel_size: 3
+    modulated: false      # DCNv1
+output:
+  dir: outputs/dcn

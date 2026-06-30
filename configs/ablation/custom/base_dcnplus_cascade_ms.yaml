@@ -1,0 +1,21 @@
+# CarDD · configs/ablation/custom/base_dcnplus_cascade_ms.yaml
+# Variante de comparación · Contrato C4·C3
+# Igual que la baseline focal pero cambia el enfoque de "hard examples":
+# cascade (refinamiento multi-stage) en lugar de focal. Ambos atacan el mismo eje;
+# esta fila mide cuál rinde más en CarDD. Tres slots distintos -> puro YAML:
+#   - multiscale -> data.image_min_size
+#   - DCN+       -> model.neck
+#   - cascade    -> detector (reemplaza RoIHeads)
+_base_: ../a0_baseline.yaml
+data:
+  image_min_size: [265, 313, 361, 409]
+model:
+  detector:
+    name: cascade_mask_rcnn
+  neck:
+    name: dcn
+    levels: ["0", "1", "2", "3", "pool"]
+    kernel_size: 3
+    modulated: true        # DCN+
+output:
+  dir: outputs/base_dcnplus_cascade_ms

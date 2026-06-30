@@ -1,0 +1,10 @@
+# CarDD · combo multi_scale + cascade (Equipo C)
+# Ortogonales: multiscale = data.image_min_size; cascade = detector (reemplaza RoIHeads).
+_base_: ../a0_baseline.yaml
+data:
+  image_min_size: [265, 313, 361, 409]
+model:
+  detector:
+    name: cascade_mask_rcnn
+output:
+  dir: outputs/ms_cascade
