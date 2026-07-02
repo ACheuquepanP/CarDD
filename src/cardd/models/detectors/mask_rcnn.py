@@ -108,10 +108,20 @@ class CarddMaskRCNN(MaskRCNN):
         num_classes = int(get(cfg, "data.num_classes")) + 1
 
         # --- transform: normaliza acá (D entrega [0,1]); todo desde data.* ---
-        # image_min_size acepta escalar (a0 y demás filas) o lista (a2 multi-scale):
-        # GeneralizedRCNNTransform muestrea una por iteración en train y usa la última en eval.
+        # image_min_size acepta escalar (a0) o lista (a2 multi-scale). Además, si hay
+        # image_min_size_ratios, la lista efectiva se arma como base*ratio (base = el
+        # escalar image_min_size), redondeada, deduplicada y ORDENADA ASCENDENTE
+        # (torchvision usa el último en eval → queremos la escala mayor ahí).
+        # GeneralizedRCNNTransform muestrea una por iteración en train.
         _ms = get(cfg, "data.image_min_size")
-        min_size = tuple(_ms) if isinstance(_ms, (list, tuple)) else int(_ms)
+        _ratios = get(cfg, "data.image_min_size_ratios")
+        if _ratios:
+            base = int(_ms)
+            min_size = tuple(sorted({round(base * float(r)) for r in _ratios}))
+        elif isinstance(_ms, (list, tuple)):
+            min_size = tuple(_ms)
+        else:
+            min_size = int(_ms)
         kwargs = dict(
             num_classes=num_classes,
             min_size=min_size,
@@ -119,6 +129,22 @@ class CarddMaskRCNN(MaskRCNN):
             image_mean=list(get(cfg, "data.image_mean")),
             image_std=list(get(cfg, "data.image_std")),
         )
+
+        # --- anchors RPN desde config (camino simple, sin registrar AnchorGenerator) ---
+        # rpn_anchor_sizes: 5 entradas, una por nivel del FPN ("0".."3" + "pool").
+        # Cada entrada es un tamaño (escalar) o una lista de tamaños en ese nivel:
+        #   reshift a chicos : [16, 32, 64, 128, 256]        (pierde el 512, los grandes)
+        #   sumar 16 extra   : [[16, 32], 64, 128, 256, 512] (mantiene 512, +VRAM en el nivel fino)
+        # Alternativa avanzada: registrar un AnchorGenerator en HEADS y usar
+        # model.rpn_anchor_generator (no combinar ambos).
+        sizes_cfg = get(cfg, "model.rpn_anchor_sizes")
+        if sizes_cfg:
+            from torchvision.models.detection.anchor_utils import AnchorGenerator
+            sizes = tuple(
+                tuple(s) if isinstance(s, (list, tuple)) else (int(s),) for s in sizes_cfg
+            )
+            ratios = tuple(get(cfg, "model.rpn_aspect_ratios", [0.5, 1.0, 2.0]))
+            kwargs["rpn_anchor_generator"] = AnchorGenerator(sizes, (ratios,) * len(sizes))
 
         # --- heads opcionales (C3): pointrend reemplaza mask_head, etc. ---
         for cfg_key, mrcnn_kwarg in _INJECTABLE_HEADS.items():
@@ -128,6 +154,11 @@ class CarddMaskRCNN(MaskRCNN):
 
         # overrides en runtime ganan sobre lo derivado de config (test/inferencia).
         kwargs.update(overrides)
+
+        # torchvision prohíbe num_classes + un *_predictor custom a la vez: el conteo
+        # de clases ya vive en el predictor (p. ej. pointrend con mask_predictor.num_classes).
+        if "mask_predictor" in kwargs or "box_predictor" in kwargs:
+            kwargs["num_classes"] = None
 
         super().__init__(backbone, **kwargs)
 
