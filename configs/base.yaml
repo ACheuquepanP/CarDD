@@ -16,7 +16,7 @@ data:
   image_max_size: 1333
   image_mean: [0.485, 0.456, 0.406]   # ImageNet (ConvNeXt-V2 preentrenado), escala [0,1]
   image_std:  [0.229, 0.224, 0.225]
-  num_workers: 4
+  num_workers: 2
   # Tiling de val/test (nuevo, D — solo lo usa scripts/evaluate_tiled.py; el
   # camino sin tiling ignora estas claves). Defaults ya viven en tiling.py, se
   # declaran aquí explícitos para que C los pueda tocar sin editar código.
