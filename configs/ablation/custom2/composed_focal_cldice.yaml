@@ -11,3 +11,5 @@ model:
     loss_mods:
       - {name: focal, alpha: 0.5, gamma: 2.0}   # sitio clasificación (reemplaza)
       - {name: cldice, weight: 1.0, iters: 3}   # sitio máscara (suma loss_mask_cldice)
+output:
+  dir: outputs/composed_focal_cldice

@@ -1,0 +1,16 @@
+# CarDD · base DCN+ & focal & multiscale + anchor fino 16px (Equipo C, reevaluación)
+# Apila el anchor RPN extra de 16px (nivel fino del FPN, stride 4) sobre la nueva
+# baseline. Ataca el cuello de objetos chicos (APS bajo) SIN sacrificar grandes:
+# "extra" suma [16,32] al nivel fino y MANTIENE 512 en el grueso (recom. de M).
+# rpn_anchor_sizes es config pura (M lo expuso en mask_rcnn.py) -> slot model, no
+# choca con DCN+ (neck), focal (detector) ni multiscale (data). Un cambio por fila.
+#
+# Lectura (per_scale del C5): APS debe SUBIR; APL no debe caer más de lo que sube APS.
+# Costo: VRAM en el nivel fino. Smoke corto antes de la corrida completa; si OOM,
+# batch 1 + grad-accum. El valor del anchor (16/24/32) no afecta VRAM, solo el nº.
+_base_: base_dcnplus_focal_ms.yaml
+model:
+  # 5 niveles FPN ("0".."3" + "pool"). Nivel fino lleva [16,32]; el resto default.
+  rpn_anchor_sizes: [16, 32, 64, 128, 256]
+output:
+  dir: outputs/base_anchors_extra16

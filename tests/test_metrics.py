@@ -344,3 +344,84 @@ def test_boundary_ap_below_mask_ap_on_degraded_border(tmp_path):
     assert c5["mask_boundary_AP"] < c5["mask_AP"], (
         f"boundary={c5['mask_boundary_AP']} debería caer bajo mask={c5['mask_AP']}"
     )
+
+
+# =====================================================================
+# Fase 2 — regresión del bug de imgIds (subconjunto / eval parcial)
+# =====================================================================
+
+
+def _gt_three_images(tmp_path):
+    """GT con 3 imágenes, un objeto por imagen (cat 3 / 7 / 3)."""
+    objs = [(1, 3, 5, 5, 10, 10), (2, 7, 30, 30, 10, 10), (3, 3, 12, 40, 10, 10)]
+    images = [{"id": i, "width": W, "height": H, "file_name": f"{i}.png"} for i in (1, 2, 3)]
+    categories = [{"id": 3, "name": "dent"}, {"id": 7, "name": "scratch"}]
+    anns = []
+    for aid, (img_id, cat_id, x, y, w, h) in enumerate(objs, start=1):
+        rle = mask_utils.encode(np.asfortranarray(_rect(x, y, w, h)))
+        anns.append({
+            "id": aid, "image_id": img_id, "category_id": cat_id,
+            "bbox": [x, y, w, h], "area": float(w * h), "iscrowd": 0,
+            "segmentation": {"counts": rle["counts"].decode("ascii"), "size": rle["size"]},
+        })
+    path = tmp_path / "gt3.json"
+    path.write_text(json.dumps({"images": images, "categories": categories, "annotations": anns}))
+    return COCO(str(path)), objs
+
+
+def _preds_for(objs, subset):
+    """Predicción perfecta solo para las imágenes en `subset`."""
+    by_img: dict[int, dict] = {}
+    for img_id, cat_id, x, y, w, h in objs:
+        if img_id not in subset:
+            continue
+        d = by_img.setdefault(img_id, {"boxes": [], "scores": [], "labels": [], "masks": []})
+        d["boxes"].append([x, y, x + w, y + h])
+        d["scores"].append(1.0)
+        d["labels"].append(CAT_ID_TO_LABEL[cat_id])
+        d["masks"].append(_rect(x, y, w, h).astype(np.float32))
+    ids = sorted(by_img)
+    preds = [
+        {
+            "boxes": np.array(by_img[i]["boxes"], np.float32),
+            "scores": np.array(by_img[i]["scores"], np.float32),
+            "labels": np.array(by_img[i]["labels"], np.int64),
+            "masks": np.stack(by_img[i]["masks"]),
+        }
+        for i in ids
+    ]
+    return preds, ids
+
+
+def test_subset_eval_restricts_to_inferred_images(tmp_path):
+    """El bug de M: GT de 3 imgs, inferencia perfecta sobre 2. Acotando a las
+    inferidas el AP da ~1; sin acotar, las 2808 (aquí 1) sin inferir lo hunden."""
+    coco_gt, objs = _gt_three_images(tmp_path)
+    preds, ids = _preds_for(objs, {1, 2})
+    results = predictions_to_coco_results(preds, ids, LABEL_TO_CAT_ID)
+    c5 = evaluate(coco_gt, results, CAT_ID_TO_NAME, image_ids=[1, 2])
+    assert c5["mask_AP"] > 0.99, f"mask_AP={c5['mask_AP']}"
+    assert c5["mask_boundary_AP"] > 0.99
+
+
+def test_inferred_empty_image_counts_as_recall_miss(tmp_path):
+    """Imagen INFERIDA pero vacía sigue contando: su GT no matcheado baja el AP.
+    Por eso se hilvanan las image_ids inferidas y no se derivan de coco_results
+    (que perdería esa imagen e inflaría el AP del split)."""
+    coco_gt, objs = _gt_three_images(tmp_path)
+    preds, ids = _preds_for(objs, {1, 2})              # imagen 3 inferida-y-vacía
+    results = predictions_to_coco_results(preds, ids, LABEL_TO_CAT_ID)
+    c5 = evaluate(coco_gt, results, CAT_ID_TO_NAME, image_ids=[1, 2, 3])
+    assert c5["mask_AP"] < 1.0, f"mask_AP={c5['mask_AP']} (img 3 sin detección debe penalizar)"
+
+
+def test_streaming_serialization_matches_batch():
+    """Fix OOM: serializar por imagen dentro del loop (y soltar las máscaras
+    densas) debe dar exactamente los mismos COCO-results que serializar el split
+    entero de golpe. Si difieren, el fix cambiaría la métrica."""
+    preds, ids = _perfect_predictions()
+    batch = predictions_to_coco_results(preds, ids, LABEL_TO_CAT_ID)
+    streamed: list[dict] = []
+    for p, i in zip(preds, ids):
+        streamed.extend(predictions_to_coco_results([p], [i], LABEL_TO_CAT_ID))
+    assert streamed == batch

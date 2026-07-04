@@ -1,0 +1,25 @@
+# CarDD · base DCN+ & cascade & multiscale (Equipo C, reevaluación) · Contrato C4·C3
+# BASELINE DE TRABAJO. Tres piezas en slots distintos -> puro YAML:
+#   - multiscale -> data.image_min_size (escalar base) + image_min_size_ratios
+#                   (M resuelve base*ratio: redondeado, dedup, ordenado ascendente)
+#   - DCN+       -> model.neck (conv deformable modulada)  [ver nota]
+#   - cascade    -> detector (reemplaza RoIHeads, 3 stages de caja)
+# Las filas de reevaluación (cldice/skeleton/pointrend/anchors) heredan de esta.
+#
+# NOTA DCN+: acá el DCN+ está como NECK (dcn modulated). Si se integra el DCN+ de
+# BACKBONE (convnextv2_tiny_dcn, estilo paper), se cambia el bloque backbone y se
+# quita el neck. Pendiente de validar el inspector de ese backbone.
+_base_: ../a0_baseline.yaml
+data:
+  # multiscale proporcional: escalas efectivas = round(image_min_size * ratio)
+  image_min_size_ratios: [0.8, 0.9, 1.0, 1.1]
+model:
+  detector:
+    name: cascade_mask_rcnn
+  neck:
+    name: dcn
+    levels: ["0", "1", "2", "3", "pool"]
+    kernel_size: 3
+    modulated: true        # DCN+
+output:
+  dir: outputs/base_dcnplus_cascade_ms

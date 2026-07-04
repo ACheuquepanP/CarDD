@@ -9,13 +9,20 @@ deterministic: false
 # --- Datos (Equipo D afina en Fase 1) ---
 data:
   root: data/CarDD_COCO
+  # root: data/CarDD_COCO_crop_split                   
   num_classes: 6
   split: [0.7, 0.2, 0.1]
-  image_min_size: 640
-  image_max_size: 1024
+  image_min_size: 950
+  image_max_size: 1333
   image_mean: [0.485, 0.456, 0.406]   # ImageNet (ConvNeXt-V2 preentrenado), escala [0,1]
   image_std:  [0.229, 0.224, 0.225]
   num_workers: 4
+  # Tiling de val/test (nuevo, D — solo lo usa scripts/evaluate_tiled.py; el
+  # camino sin tiling ignora estas claves). Defaults ya viven en tiling.py, se
+  # declaran aquí explícitos para que C los pueda tocar sin editar código.
+  tiling:
+    n: 3            # matriz n x n de tiles por imagen (n impar -> tile central)
+    tile_frac: 0.5  # tamaño del tile relativo a (W,H)
 
 # --- Modelo (M afina en Fase 3; backbone-específico -> convnextv2_tiny.yaml) ---
 model:
@@ -27,24 +34,40 @@ model:
 
 # --- Entrenamiento: schedule = constante de proyecto, FIJO entre filas ---
 train:
-  epochs: 12
-  batch_size: 2               # físico (8 GB)
-  grad_accum_steps: 8         # batch efectivo = 16
+  epochs: 15
+  batch_size: 1               # físico (8 GB)
+  grad_accum_steps: 16         # batch efectivo = 16
   grad_clip: 1.0              # clip de norma del gradiente
   amp: true                   # precisión mixta
   optimizer:
     name: adamw
-    lr: 0.0001
-    weight_decay: 0.05
+    lr: 0.0025
+    weight_decay: 0.01
   scheduler:
     name: cosine
-    warmup_steps: 250
+    warmup_steps: 500
 
 # --- Evaluación (Equipo E, Fase 2) ---
 eval:
   metrics: [mask_AP, box_AP, AP50, AP75]
   per_class: true
   per_scale: true
+  # Fusión por grafo de máscaras para el camino con tiling (M expone los knobs /
+  # C fija los valores). Sin efecto en evaluate.py (sin tiling); solo lo lee
+  # scripts/evaluate_tiled.py vía engine/inference.py. Defaults elegidos por
+  # criterio, no por AP: containment reconcilia mejor las costuras; uniform es
+  # el baseline honesto antes de probar feathered.
+  fusion:
+    match_metric: containment  # 'containment' = inter/min(area) | 'iou' clásico
+    match_thr: 0.5             # solape mínimo de máscara para unir dos detecciones
+    mask_weight: uniform       # 'uniform' | 'feathered' (ventana Hann hacia el borde)
+    mask_thr: 0.5              # umbral de binarización (matching y bbox)
+    score_reduce: max          # 'max' del grupo | 'wavg_area' ponderado por área
+  # Sub-batch por tile en el forward (VRAM vs velocidad, nunca cambia el resultado).
+  # null (default) -> hereda data.tiling.n (procesa de a "una fila" de la grilla
+  # n x n en vez de los n^2 tiles juntos). 0 o negativo -> todos los tiles juntos
+  # (comportamiento previo a este knob). Un entero explícito pisa el default.
+  tile_batch_size: null
 
 # --- Logging / salidas ---
 output:

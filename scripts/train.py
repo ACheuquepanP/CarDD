@@ -23,7 +23,6 @@ from cardd.utils.logging import get_logger
 from cardd.data.build import build_dataloader
 from cardd.models.detectors.mask_rcnn import build_detector
 from cardd.engine.trainer import Trainer
-from cardd.engine.inference import _load_weights
 
 
 def _force_eval_transforms(cfg, log) -> None:
@@ -73,7 +72,12 @@ def main() -> None:
     ap.add_argument("--config", required=True)
     ap.add_argument("--overfit", type=int, default=0,
                     help="smoke loss→0: entrena sobre N imágenes (hito paso 13)")
-    ap.add_argument("--resume", default=None, help="checkpoint del que cargar pesos antes de entrenar")
+    ap.add_argument("--resume", default=None,
+                    help="checkpoint para RESUME estricto (modelo+optimizer+scheduler+época+best). "
+                         "Sin --resume, el backbone parte de los pesos de timm.")
+    ap.add_argument("--warm-start", default=None,
+                    help="checkpoint para WARM-START (solo pesos; schedule nuevo desde epoch 0). "
+                         "Para extender un modelo ya entrenado con un schedule corto.")
     args = ap.parse_args()
 
     cfg = load_config(args.config)
@@ -92,12 +96,13 @@ def main() -> None:
         val_loader = build_dataloader(cfg, "val")
 
     model = build_detector(cfg)
+    trainer = Trainer(cfg, model, train_loader, val_loader)
+    if args.warm_start:
+        trainer.warm_start(args.warm_start)   # warm-start: solo pesos, schedule nuevo
     if args.resume:
-        device = torch.device(get(cfg, "train.device", "cuda"))
-        _load_weights(model, args.resume, device)
-        log.info("pesos cargados desde %s", args.resume)
+        trainer.resume(args.resume)   # resume ESTRICTO: modelo+optimizer+scheduler+época+best
 
-    ckpt = Trainer(cfg, model, train_loader, val_loader).train()
+    ckpt = trainer.train()
     log.info("listo · checkpoint final: %s", ckpt)
 
 

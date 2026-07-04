@@ -29,7 +29,12 @@ from einops import rearrange
 
 from cardd.utils.registry import NECKS
 
-_DEFAULT_LEVELS = ("0", "1", "2", "3", "pool")
+# Niveles del FPN donde se aplica DSConv. Por defecto solo los de ALTA resolución
+# ("0","1"): es donde viven las estructuras finas (scratch/crack) que el módulo
+# busca, y limita la huella de VRAM (cada nivel = 2 ramas DynamicSnakeConv). Los
+# niveles gruesos ("2","3","pool") capturan objetos grandes, donde la serpiente
+# deformable aporta poco. Configurable desde el yaml: model.neck.levels.
+_DEFAULT_LEVELS = ("0", "1")
 
 
 def build_snake_grids(offset: torch.Tensor, H: int, W: int, morph: int, extend_scope: float):

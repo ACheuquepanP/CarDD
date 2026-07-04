@@ -1,0 +1,21 @@
+# CarDD · ablación pareada · base(DCN-neck & cascade & ms) + PointRend + clDice
+_base_: base_dcnNECK_cascade_ms.yaml
+model:
+  detector:
+    name: cascade_mask_rcnn_composed
+    loss_mods:
+      - {name: cldice, weight: 1.0, iters: 3}
+    pointrend: True
+    point_loss_weight: 1.0
+    point_target_resolution: 112
+    pointrend_cfg:
+      in_channels: 288
+      num_classes: 7
+      train_num_points: 196
+      oversample_ratio: 3.0
+      importance_sample_ratio: 0.75
+      subdivision_steps: 3
+      subdivision_num_points: 196
+
+output:
+  dir: outputs/abl_pointrend_cldice

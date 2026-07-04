@@ -91,8 +91,8 @@ class Trainer:
         # early stopping OPCIONAL (default OFF → schedule fijo, no afecta la ablación)
         es = "train.early_stopping"
         self.es_enabled = bool(get(cfg, f"{es}.enabled", False))
-        self.es_patience = max(1, int(get(cfg, f"{es}.patience", 3)))
-        self.es_min_delta = float(get(cfg, f"{es}.min_delta", 0.0))
+        self.es_patience = max(1, int(get(cfg, f"{es}.patience", 5)))
+        self.es_min_delta = float(get(cfg, f"{es}.min_delta", 0.001))
         self.es_counter = 0
 
         steps_per_epoch = max(1, math.ceil(len(self.loader) / self.accum))
@@ -102,6 +102,42 @@ class Trainer:
         self.scaler = torch.amp.GradScaler(device=self.device.type, enabled=self.amp)
         self.tb = SummaryWriter(str(self.out_dir / "tb"))
         self.step = 0
+        self.start_epoch = 0  # se adelanta si se hace resume()
+
+    def warm_start(self, ckpt_path) -> None:
+        """Warm-start (NO estricto): carga SOLO los pesos del modelo y arranca un
+        entrenamiento FRESCO (epoch 0, optimizer/scheduler nuevos del yaml actual).
+        A diferencia de resume(), el lr vuelve a subir/decae segun el schedule de
+        ESTA config -> sirve para extender con un schedule corto y exprimir lo que
+        quedo. optimizer/scheduler/epoca/step del checkpoint se ignoran a proposito.
+        """
+        ckpt = torch.load(ckpt_path, map_location=self.device)
+        self.model.load_state_dict(ckpt["model"])
+        self.log.info(
+            "warm-start desde %s - pesos cargados - schedule nuevo (epoch 0/%d, lr fresco)",
+            ckpt_path, self.epochs,
+        )
+
+    def resume(self, ckpt_path) -> None:
+        """Resume ESTRICTO: restaura modelo + optimizer + scheduler + época + best.
+
+        Mismo modelo (load_state_dict estricto: si el backbone difiere, falla ruidoso
+        — eso es correcto, no se reanuda otra arquitectura). Pensado para Colab: si la
+        sesión se corta, `--resume outputs/.../last.pth` continúa exactamente donde iba.
+        """
+        ckpt = torch.load(ckpt_path, map_location=self.device)
+        self.model.load_state_dict(ckpt["model"])
+        if ckpt.get("optimizer") is not None:
+            self.optimizer.load_state_dict(ckpt["optimizer"])
+        if self.scheduler is not None and ckpt.get("scheduler") is not None:
+            self.scheduler.load_state_dict(ckpt["scheduler"])
+        self.best_metric = float(ckpt.get("best_metric", float("-inf")))
+        self.step = int(ckpt.get("step", 0))
+        self.start_epoch = int(ckpt.get("epoch", -1)) + 1
+        self.log.info(
+            "resume desde %s · sigue en epoch %d/%d · best_metric=%.4f · step=%d",
+            ckpt_path, self.start_epoch, self.epochs, self.best_metric, self.step,
+        )
 
     def _to_device(self, images, targets):
         images = [img.to(self.device, non_blocking=True) for img in images]
@@ -125,10 +161,9 @@ class Trainer:
             self.optimizer.param_groups[0]["lr"],
             get(self.cfg, "train.scheduler.name", "cosine"),
         )
-        last_epoch = 0
-        for epoch in range(self.epochs):
+        last = self.out_dir / "last.pth"  # default si el loop no corre (resume ya completo)
+        for epoch in range(self.start_epoch, self.epochs):
             self._run_epoch(epoch)
-            last_epoch = epoch
 
             # validación SIN gradiente + selección de best.pth por mask_AP de val
             if self.val_loader is not None and (epoch + 1) % self.val_interval == 0:
@@ -144,12 +179,15 @@ class Trainer:
                     if self.es_counter >= self.es_patience:
                         self.log.info("early stopping en epoch %d (%d vals sin mejora > %.4g)",
                                       epoch, self.es_patience, self.es_min_delta)
+                        # last.pth cada época: se sobrescribe → reanudable si Colab corta
+                        numbered = bool(self.ckpt_interval and (epoch + 1) % self.ckpt_interval == 0)
+                        last = self.save_checkpoint(epoch, numbered=numbered)
                         break
 
-            # guardado periódico opcional (ckpt_interval=0 → solo al final)
-            if self.ckpt_interval and (epoch + 1) % self.ckpt_interval == 0:
-                self.save_checkpoint(epoch, numbered=True)
-        last = self.save_checkpoint(last_epoch)
+            # last.pth cada época (estado completo): reanudable si Colab corta.
+            # numbered opcional (ckpt_interval>0) si además se quiere histórico.
+            numbered = bool(self.ckpt_interval and (epoch + 1) % self.ckpt_interval == 0)
+            last = self.save_checkpoint(epoch, numbered=numbered)
         self.tb.close()
         return last
 
@@ -226,6 +264,7 @@ class Trainer:
             {
                 "model": self.model.state_dict(),
                 "optimizer": self.optimizer.state_dict(),
+                "scheduler": self.scheduler.state_dict() if self.scheduler is not None else None,
                 "epoch": epoch,
                 "step": self.step,
                 "best_metric": self.best_metric,

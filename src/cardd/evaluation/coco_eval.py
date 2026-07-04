@@ -36,11 +36,12 @@ import pycocotools.mask as mask_utils
 from pycocotools.coco import COCO
 from pycocotools.cocoeval import COCOeval
 
+from cardd.evaluation.boundary_eval import run_boundary_eval
 from cardd.evaluation.per_class_metrics import extract_per_class
 from cardd.evaluation.per_scale_metrics import extract_per_scale
 
 # Llaves del contrato C5 (se valida que evaluate() las emita todas).
-C5_KEYS = ("mask_AP", "box_AP", "AP50", "AP75", "per_class", "per_scale")
+C5_KEYS = ("mask_AP", "box_AP", "AP50", "AP75", "mask_boundary_AP", "per_class", "per_scale")
 
 
 def _to_numpy(x: Any) -> np.ndarray:
@@ -100,10 +101,19 @@ def predictions_to_coco_results(
     return results
 
 
-def _run_one(coco_gt: COCO, coco_results: list[dict], iou_type: str) -> COCOeval:
-    """Una pasada de COCOeval (evaluate+accumulate+summarize) para un iouType."""
+def _run_one(
+    coco_gt: COCO, coco_results: list[dict], iou_type: str, img_ids: list[int]
+) -> COCOeval:
+    """Una pasada de COCOeval (evaluate+accumulate+summarize) para un iouType.
+
+    img_ids = imágenes realmente INFERIDAS (no solo las que tienen detección):
+    COCOeval evalúa por defecto sobre TODO el GT, así que sin recortar, las
+    imágenes con GT pero sin inferencia hunden el AP (bug AP≈0 en subconjuntos).
+    Una imagen inferida-y-vacía debe quedar en img_ids: cuenta como recall miss.
+    """
     coco_dt = coco_gt.loadRes(coco_results)
     ev = COCOeval(coco_gt, coco_dt, iouType=iou_type)
+    ev.params.imgIds = img_ids
     ev.evaluate()
     ev.accumulate()
     ev.summarize()
@@ -117,7 +127,11 @@ def _empty_c5(cat_id_to_name: Mapping[int, str]) -> dict:
         "box_AP": 0.0,
         "AP50": 0.0,
         "AP75": 0.0,
-        "per_class": {name: {"mask_AP": 0.0, "box_AP": 0.0} for name in cat_id_to_name.values()},
+        "mask_boundary_AP": 0.0,
+        "per_class": {
+            name: {"mask_AP": 0.0, "box_AP": 0.0, "boundary_AP": 0.0}
+            for name in cat_id_to_name.values()
+        },
         "per_scale": {"APS": 0.0, "APM": 0.0, "APL": 0.0},
     }
 
@@ -126,24 +140,41 @@ def evaluate(
     coco_gt: COCO,
     coco_results: list[dict],
     cat_id_to_name: Mapping[int, str],
+    image_ids: list[int] | None = None,
+    with_boundary: bool = True,
 ) -> dict:
     """GT (ds.coco) + resultados COCO -> dict C5.
 
     cat_id_to_name = {cid: ds.label_to_name[label]
                       for cid, label in ds.cat_id_to_label.items()}
+
+    image_ids = imágenes INFERIDAS (todas las que pasaron por el modelo, incluso
+    las que salieron vacías). Es lo que acota la evaluación al subconjunto real;
+    sin esto COCOeval promedia contra todo el GT (bug AP≈0 en smoke/eval parcial).
+    Si es None, se cae a las imágenes presentes en coco_results — válido solo si
+    no hay imágenes inferidas-y-vacías (p. ej. el smoke de overfit).
+
+    with_boundary agrega Boundary AP (gate ②). Tiene costo (decodifica máscaras).
     """
     if not coco_results:
         return _empty_c5(cat_id_to_name)
 
-    ev_segm = _run_one(coco_gt, coco_results, "segm")
-    ev_bbox = _run_one(coco_gt, coco_results, "bbox")
+    if image_ids is not None:
+        img_ids = sorted(set(image_ids))
+    else:
+        img_ids = sorted({r["image_id"] for r in coco_results})
+
+    ev_segm = _run_one(coco_gt, coco_results, "segm", img_ids)
+    ev_bbox = _run_one(coco_gt, coco_results, "bbox", img_ids)
+    ev_bnd = run_boundary_eval(coco_gt, coco_results, img_ids) if with_boundary else None
 
     out = {
         "mask_AP": float(ev_segm.stats[0]),
         "box_AP": float(ev_bbox.stats[0]),
         "AP50": float(ev_segm.stats[1]),   # segm
         "AP75": float(ev_segm.stats[2]),   # segm
-        "per_class": extract_per_class(ev_segm, ev_bbox, cat_id_to_name),
+        "mask_boundary_AP": float(ev_bnd.stats[0]) if ev_bnd is not None else float("nan"),
+        "per_class": extract_per_class(ev_segm, ev_bbox, cat_id_to_name, ev_bnd),
         "per_scale": extract_per_scale(ev_segm),  # escalas sobre mascara
     }
     assert set(C5_KEYS) <= out.keys(), "C5 incompleto"
@@ -167,7 +198,7 @@ def evaluate_from_dataset(dataset: Any, predictions, image_ids) -> dict:
         cid: dataset.label_to_name[label] for cid, label in dataset.cat_id_to_label.items()
     }
     results = predictions_to_coco_results(predictions, image_ids, label_to_cat_id)
-    return evaluate(dataset.coco, results, cat_id_to_name)
+    return evaluate(dataset.coco, results, cat_id_to_name, image_ids=image_ids)
 
 
 __all__ = ["predictions_to_coco_results", "evaluate", "evaluate_from_dataset", "C5_KEYS"]

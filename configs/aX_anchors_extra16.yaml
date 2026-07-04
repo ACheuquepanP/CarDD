@@ -1,0 +1,25 @@
+# configs/ablation/aX_anchors_extra16.yaml
+# Fila de ablación: agregar un anchor de 16px al nivel más fino del FPN,
+# manteniendo los grandes (512). Un solo cambio vs a0 (los anchors).
+#
+# Lee el per_scale del C5 para el veredicto:
+#   - APS (small)  debe SUBIR (es el objetivo).
+#   - APL (large)  vigilar que no caiga más de lo que sube APS.
+#   - mask_AP      veredicto neto.
+#
+# Validar OOM con un smoke corto antes de la corrida completa (suma anchors en
+# el nivel de 160x160). Si no entra en 8 GB: batch 1 + más grad-accum.
+
+_base_: a0_baseline.yaml
+
+model:
+  # 5 niveles del FPN ("0".."3" + "pool"). El nivel fino lleva [16, 32]; el resto, default.
+  rpn_anchor_sizes: [[16, 32], 64, 128, 256, 512]
+  # (opcional) aspect ratios; default torchvision = [0.5, 1.0, 2.0]
+  # rpn_aspect_ratios: [0.5, 1.0, 2.0]
+
+# --- Variantes para barrer (descomentar UNA por fila, no mezclar) ---
+# reshift puro (gratis en VRAM, sacrifica grandes):
+#   rpn_anchor_sizes: [16, 32, 64, 128, 256]
+# intermedio + extra (16 y 24 en el nivel fino):
+#   rpn_anchor_sizes: [[16, 24, 32], 64, 128, 256, 512]

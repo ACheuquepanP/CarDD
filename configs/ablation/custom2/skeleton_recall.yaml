@@ -11,3 +11,5 @@ model:
       weight: 1.0     # peso del término
       iters: 3        # iteraciones de skeletonización del GT
       tube: true      # entubar el esqueleto (confinado al GT)
+output:
+  dir: outputs/skeleton_recall

@@ -1,0 +1,29 @@
+# CarDD · PRUEBA · base(DCN-neck & cascade & ms) + clDice + skeleton + PointRend
+# Smoke del detector unificado con los TRES apilados.
+#
+# NOTA: con cascade, pointrend NO se declara como mask_head/mask_predictor (eso
+# forzaría num_classes=None y rompe los box_predictors de cascade). Se activa con
+# `pointrend: true` y el detector construye la cabeza pointrend internamente. Los
+# hiperparámetros opcionales van bajo model.mask_predictor (sin 'name').
+# CarDD · PRUEBA · base(DCN-neck & cascade & ms) + clDice + skeleton + PointRend
+_base_: base_dcnNECK_cascade_ms.yaml
+model:
+  detector:
+    name: cascade_mask_rcnn_composed
+    loss_mods:
+      - {name: cldice, weight: 1.0, iters: 3}
+      - {name: skeleton, weight: 1.0, iters: 3, tube: true}
+    pointrend: True
+    point_loss_weight: 1.0
+    point_target_resolution: 112
+    pointrend_cfg:                      # ← antes era model.mask_predictor
+      in_channels: 288
+      num_classes: 7
+      train_num_points: 196
+      oversample_ratio: 3.0
+      importance_sample_ratio: 0.75
+      subdivision_steps: 3
+      subdivision_num_points: 196
+
+output:
+  dir: outputs/test_stack_full

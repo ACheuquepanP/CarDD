@@ -33,22 +33,30 @@ def extract_per_class(
     eval_segm: COCOeval,
     eval_bbox: COCOeval,
     cat_id_to_name: dict[int, str],
+    eval_boundary: COCOeval | None = None,
 ) -> dict[str, dict[str, float]]:
-    """Devuelve {nombre_clase: {'mask_AP': float, 'box_AP': float}}.
+    """Devuelve {nombre_clase: {'mask_AP', 'box_AP'[, 'boundary_AP']}}.
 
     cat_id_to_name viene de invertir/combinar los mapas que expone D:
         cat_id_to_name = {cid: ds.label_to_name[label]
                           for cid, label in ds.cat_id_to_label.items()}
+
+    Si se pasa eval_boundary (COCOevalBoundary ya acumulado), agrega boundary_AP
+    por clase, clave para juzgar a3_pointrend en scratch/crack.
     """
     mask_ap = _ap_per_category(eval_segm)
     box_ap = _ap_per_category(eval_bbox)
-    return {
-        cat_id_to_name[cid]: {
+    bnd_ap = _ap_per_category(eval_boundary) if eval_boundary is not None else None
+    out: dict[str, dict[str, float]] = {}
+    for cid, name in cat_id_to_name.items():
+        entry = {
             "mask_AP": mask_ap.get(cid, float("nan")),
             "box_AP": box_ap.get(cid, float("nan")),
         }
-        for cid in cat_id_to_name
-    }
+        if bnd_ap is not None:
+            entry["boundary_AP"] = bnd_ap.get(cid, float("nan"))
+        out[name] = entry
+    return out
 
 
 __all__ = ["extract_per_class"]

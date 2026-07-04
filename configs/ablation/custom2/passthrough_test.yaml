@@ -1,0 +1,23 @@
+# CarDD · configs/ablation/custom/passthrough_test.yaml
+# Dueño: M (diagnóstico) · Contrato C4
+#
+# NO es una fila de ablación. Es una config de DIAGNÓSTICO para el test
+# passthrough: hereda TODO de base_dcnplus_cascade_ms (mismo modelo, mismos
+# pesos, misma escala image_min_size) y solo pisa el tiling para que degenere
+# a un único "tile" = la imagen entera:
+#   n=1        -> una sola posición de tile
+#   tile_frac=1.0 -> el tile es (W,H), offset (0,0), reproyección identidad
+#
+# Con esto + un iou_thr imposible (--iou-thr 1.01 en el grid), WBF no fusiona
+# nada: mismo modelo y datos pasando por la plomería de tiling (cache, fuse,
+# serialización, evaluate) pero SIN geometría multi-tile.
+#
+#   ~0.6  -> la plomería está sana; el bug vive en el régimen multi-tile
+#            (reproyección con offsets reales o fusión de costura).
+#   ~0.05 -> la plomería compartida es la culpable (serialización, image_ids,
+#            mapeo de categorías) — el mismo tipo de bug que E tuvo con imgIds.
+_base_: base_dcnplus_cascade_ms.yaml
+data:
+  tiling:
+    n: 1
+    tile_frac: 1.0

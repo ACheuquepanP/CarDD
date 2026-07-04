@@ -12,3 +12,5 @@ model:
     focal:
       alpha: 0.5               # balanceo (matriz de ablación)
       gamma: 2.0               # enfoque
+output:
+  dir: outputs/a1_focal

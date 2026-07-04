@@ -19,4 +19,6 @@
 _base_: a0_baseline.yaml
 
 data:
-  image_min_size: [512, 576, 640, 704]
+  image_min_size: [416, 480, 512, 576]
+output:
+  dir: outputs/a2_multiscale

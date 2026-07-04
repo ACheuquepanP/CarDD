@@ -1,0 +1,21 @@
+
+# CarDD · baseline variante NECK · DCN(neck) & cascade & multiscale (Equipo C)
+# DCNv2 modulada aplicada como NECK sobre el FPN. Comparar contra la variante
+# BACKBONE (base_dcnBACKBONE_cascade_ms.yaml): idénticas salvo DÓNDE va el DCN.
+#   - multiscale -> data.image_min_size_ratios (M resuelve base*ratio)
+#   - DCN        -> model.neck (dcn modulated)   <-- la diferencia
+#   - cascade    -> detector (3 stages de caja)
+_base_: ../a0_baseline.yaml
+data:
+  image_min_size_ratios: [0.7, 0.85, 1.0, 1.2]
+model:
+  detector:
+    name: cascade_mask_rcnn
+  neck:
+    name: dcn
+    levels: ["0", "1", "2", "3", "pool"]
+    kernel_size: 3
+    modulated: true
+output:
+  dir: outputs/base_dcnNECK_cascade_ms
+ 

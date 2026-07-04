@@ -1,0 +1,18 @@
+# CarDD · configs/ablation/custom/dsconv.yaml
+# Fila custom §5.2 (Equipo C, Fase B) · Contrato C4·C3
+# Delta sobre a0: inserta el neck DSConv (serpiente deformable) sobre el FPN.
+# Residual -> si los offsets son ~0 al inicio, no degrada el FPN. Un cambio por fila.
+#
+# DSConv ÍNTEGRO (restaurado tras bajar min_size): kernel 9 en los 5 niveles del FPN,
+# como el diseño original. La factorización del aggregate (sin stack C*K) + el
+# gradient checkpointing en dsconv.py permiten correrlo entero ahora que la
+# resolución bajó. El tamaño de imagen lo hereda de base (min/max actuales).
+_base_: ../a0_baseline.yaml
+model:
+  neck:
+    name: dsconv
+    levels: ["0", "1", "2", "3", "pool"]
+    kernel_size: 9
+    extend_scope: 1.0
+output:
+  dir: outputs/dsconv

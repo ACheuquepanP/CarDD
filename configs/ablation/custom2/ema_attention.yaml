@@ -7,3 +7,5 @@ model:
   neck:
     name: ema_attention
     factor: 8
+output:
+  dir: outputs/ema_attention

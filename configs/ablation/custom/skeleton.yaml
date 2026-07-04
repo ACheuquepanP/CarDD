@@ -1,0 +1,11 @@
+# CarDD · ablación 1-a-1 · base(DCN-neck & cascade & ms) + Skeleton solo
+_base_: base_dcnNECK_cascade_ms.yaml
+model:
+  detector:
+    name: cascade_mask_rcnn_composed
+    loss_mods:
+      - {name: skeleton, weight: 1.0, iters: 3, tube: true}
+    pointrend: False              # explícito
+
+output:
+  dir: outputs/abl_skeleton

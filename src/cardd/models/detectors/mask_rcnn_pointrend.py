@@ -128,7 +128,7 @@ def subdivision_inference(
         idx = point_indices.unsqueeze(1).expand(-1, C, -1)                 # [N, C, P]
         mask_logits = (
             mask_logits.reshape(N, C, H * W)
-            .scatter_(2, idx, point_logits)
+            .scatter_(2, idx, point_logits.to(mask_logits.dtype))
             .view(N, C, H, W)
         )
     return mask_logits

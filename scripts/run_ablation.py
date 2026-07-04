@@ -30,8 +30,8 @@ import subprocess
 import sys
 from pathlib import Path
 
-# Columnas de la tabla = contrato C5 aplanado (mascara primaria + escalas).
-_HEAD = ("mask_AP", "box_AP", "AP50", "AP75")
+# Columnas de la tabla = contrato C5 aplanado (mascara primaria + borde + escalas).
+_HEAD = ("mask_AP", "mask_boundary_AP", "box_AP", "AP50", "AP75")
 _SCALE = ("APS", "APM", "APL")
 _COLS = _HEAD + _SCALE
 
@@ -54,18 +54,31 @@ def _row_metrics(c5: dict) -> dict[str, float]:
 
 
 def build_table(results: dict[str, dict], baseline: str) -> list[dict]:
-    """results: {fila: C5}. Devuelve filas ordenadas (baseline primero) con
-    valores y deltas vs baseline por columna."""
+    """results: {fila: C5} en ORDEN ADITIVO (a0 -> a1 -> ...). Por fila devuelve:
+      - deltas:      vs baseline      -> ganancia acumulada
+      - deltas_prev: vs fila anterior -> contribución marginal del módulo que entra
+
+    El estudio es acumulativo (decisión gate ③): cada fila = fila previa + un
+    módulo. Por eso el orden de `results` ES la cadena aditiva y no se reordena.
+    """
     base = _row_metrics(results[baseline]) if baseline in results else None
     table: list[dict] = []
+    prev_vals: dict[str, float] | None = None
     for name, c5 in results.items():
         vals = _row_metrics(c5)
         deltas = {
             c: (vals[c] - base[c] if base and _valid(vals[c]) and _valid(base[c]) else None)
             for c in _COLS
         }
-        table.append({"name": name, "values": vals, "deltas": deltas, "baseline": name == baseline})
-    table.sort(key=lambda r: (not r["baseline"]))  # estable: baseline primero
+        deltas_prev = {
+            c: (vals[c] - prev_vals[c] if prev_vals and _valid(vals[c]) and _valid(prev_vals[c]) else None)
+            for c in _COLS
+        }
+        table.append({
+            "name": name, "values": vals, "deltas": deltas,
+            "deltas_prev": deltas_prev, "baseline": name == baseline,
+        })
+        prev_vals = vals
     return table
 
 
@@ -82,7 +95,7 @@ def _md_row(cells: list[str]) -> str:
 
 
 def render_markdown(table: list[dict]) -> str:
-    """Dos tablas: valores absolutos y deltas vs baseline."""
+    """Tres tablas: absolutos, Δ vs baseline (acumulada) y Δ vs fila anterior (marginal)."""
     header = _md_row(["config", *_COLS])
     sep = _md_row(["---"] * (len(_COLS) + 1))
 
@@ -95,26 +108,35 @@ def render_markdown(table: list[dict]) -> str:
         _md_row([r["name"], *["—" if r["baseline"] else _fmt_delta(r["deltas"][c]) for c in _COLS]])
         for r in table
     ]
+    marg_rows = [
+        _md_row([r["name"], *["—" if r["deltas_prev"][c] is None else _fmt_delta(r["deltas_prev"][c])
+                              for c in _COLS]])
+        for r in table
+    ]
 
     return (
         "### Ablación — valores absolutos\n\n"
         + "\n".join([header, sep, *abs_rows])
-        + "\n\n### Ablación — Δ vs baseline\n\n"
+        + "\n\n### Ablación — Δ vs baseline (ganancia acumulada)\n\n"
         + "\n".join([header, sep, *delta_rows])
+        + "\n\n### Ablación — Δ vs fila anterior (contribución marginal)\n\n"
+        + "\n".join([header, sep, *marg_rows])
         + "\n"
     )
 
 
-def render_per_class(results: dict[str, dict]) -> str:
-    """Tabla aparte de mask_AP por clase (para juzgar a1_focal y los custom)."""
+def render_per_class(results: dict[str, dict], metric: str = "mask_AP", title: str | None = None) -> str:
+    """Tabla de <metric> por clase. Con metric='mask_AP' juzga a1_focal y los
+    custom; con metric='boundary_AP' juzga a3_pointrend en scratch/crack."""
     classes = sorted({c for c5 in results.values() for c in c5["per_class"]})
     header = _md_row(["config", *classes])
     sep = _md_row(["---"] * (len(classes) + 1))
     rows = [
-        _md_row([name, *[_fmt(c5["per_class"].get(cl, {}).get("mask_AP", float("nan"))) for cl in classes]])
+        _md_row([name, *[_fmt(c5["per_class"].get(cl, {}).get(metric, float("nan"))) for cl in classes]])
         for name, c5 in results.items()
     ]
-    return "### Ablación — mask_AP por clase\n\n" + "\n".join([header, sep, *rows]) + "\n"
+    head = title or f"Ablación — {metric} por clase"
+    return f"### {head}\n\n" + "\n".join([header, sep, *rows]) + "\n"
 
 
 def load_results(results_dir: Path, configs: list[str]) -> dict[str, dict]:
@@ -178,7 +200,10 @@ def main() -> None:
         raise SystemExit("[run_ablation] no hay resultados que tabular.")
 
     table = build_table(results, args.baseline)
-    md = render_markdown(table) + "\n" + render_per_class(results)
+    parts = [render_markdown(table), render_per_class(results, "mask_AP")]
+    if any("boundary_AP" in v for c5 in results.values() for v in c5["per_class"].values()):
+        parts.append(render_per_class(results, "boundary_AP"))
+    md = "\n".join(parts)
     print(md)
 
     out = Path(args.out) if args.out else results_dir / "ablation_table.md"

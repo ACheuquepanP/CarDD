@@ -1,0 +1,10 @@
+_base_: ../pointrend_skeleton.yaml
+train:
+  epochs: 10
+  optimizer:
+    lr: 0.00005
+    weight_decay: 0.05
+  scheduler:
+    warmup_steps: 500
+output:
+  dir: outputs/abl_pointrend_skeleton_extend

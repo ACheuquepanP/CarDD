@@ -1,71 +1,147 @@
-"""scripts/evaluate.py — evalúa un checkpoint sobre un split → C5.
+"""CarDD · scripts/evaluate.py
 
-dueño: M·E · fase: 4 · contrato: C5
+Dueno: Equipo M · E - Fase: 4 - Contrato: C2 (consume) -> C5 (produce)
 
-Punta a punta, conecta las dos mitades:
-    build_eval_model (M) → run_inference (M) → evaluate_from_dataset (E)
+Evalua un checkpoint sobre un split y emite el dict C5 (a stdout + JSON).
+Reparto del trabajo en este archivo compartido:
 
-NOTA de integración: E ya tiene su mitad de este script (formato C5 a stdout +
-JSON, modo árbitro). Este archivo es el **punto de encuentro M·E**: M aporta la
-costura de inferencia; reconciliar el reporte/flags con la versión de E para no
-duplicar. La frontera estable es C2→C5: M entrega C2, E calcula C5.
+  Mitad de E (lista, abajo):
+    - construye el loader de eval (D) y saca el GT de loader.dataset.coco
+    - corre el loop de inferencia generico de torchvision (model(images) -> C2)
+    - serializa C2 a COCO y calcula C5 con cardd.evaluation
+    - imprime y guarda el resultado
 
-Uso:
-    PYTHONPATH=src python scripts/evaluate.py \
-        --config configs/ablation/a0_baseline.yaml \
-        --weights outputs/a0_baseline/last.pth --split val
+  Costura de M (Fase 3, un solo punto):
+    build_eval_model(cfg, weights) -> nn.Module en eval(), en device, tal que
+    model(list[Tensor[3,H,W]]) devuelva la salida nativa de MaskRCNN:
+    list[dict] por imagen con boxes(xyxy), scores, labels(1..N), masks[K,1,H,W].
+    Mientras M no la publique en cardd.engine.inference, el script avisa claro
+    y sale; la parte de E ya esta testeada con un dataset sintetico.
 
-    # SMOKE end-to-end (tras `train.py --overfit 8`): AP≈1 sobre esas 8 imágenes
-    PYTHONPATH=src python scripts/evaluate.py \
-        --config configs/ablation/a0_baseline.yaml \
-        --weights outputs/a0_baseline/last.pth --split train --overfit 8
+Nada se hardcodea: split, salida y device salen de la config / CLI.
 """
-
 from __future__ import annotations
 
 import argparse
 import json
 from pathlib import Path
 
-from cardd.utils.config import load_config, get
-from cardd.utils.seed import set_seed
+from cardd.evaluation.coco_eval import evaluate
+from cardd.utils.config import get, load_config
 from cardd.utils.logging import get_logger
-from cardd.data.build import build_dataloader
-from cardd.engine.inference import build_eval_model, run_inference
-from cardd.evaluation.coco_eval import evaluate_from_dataset
+from cardd.utils.seed import set_seed
+
+
+def _pick_device(cfg) -> str:
+    """Device de la config si esta; si no, cuda cuando exista, si no cpu."""
+    dev = get(cfg, "eval.device")
+    if dev:
+        return dev
+    import torch
+
+    return "cuda" if torch.cuda.is_available() else "cpu"
+
+
+def _build_eval_model(cfg, weights: str, device: str):
+    """Costura de M: trae el modelo listo para inferencia.
+
+    Espera cardd.engine.inference.build_eval_model(cfg, weights, device).
+    Si M aun no la implemento, corta con un mensaje accionable en vez de un
+    traceback opaco.
+    """
+    try:
+        from cardd.engine.inference import build_eval_model
+    except ImportError as exc:  # el modulo es un stub todavia
+        raise SystemExit(
+            "scripts/evaluate.py: falta la costura de M. Se necesita "
+            "cardd.engine.inference.build_eval_model(cfg, weights, device) -> "
+            "nn.Module en eval() que produzca C2 (salida nativa de MaskRCNN). "
+            f"Detalle: {exc}"
+        ) from exc
+    return build_eval_model(cfg, weights, device)
+
+
+def collect_coco_results(cfg, split: str, weights: str, logger):
+    """Corre la inferencia sobre el split y devuelve (dataset, coco_results, image_ids).
+
+    STREAMING: serializa la predicción de cada imagen a COCO-results (RLE) DENTRO
+    del loop y acumula solo eso; las máscaras densas se sueltan en cada iteración.
+    Acumular C2 crudo (máscaras del tamaño de la imagen) de todas las imágenes del
+    split desborda la RAM en filas con muchas detecciones (p. ej. a1_focal); en RLE
+    es órdenes de magnitud menos. torchvision ya capa en box_detections_per_img=100,
+    así que el peso real era el formato denso, no la cantidad.
+
+    El loop es genérico de torchvision; lo único de M es el modelo. El GT para
+    evaluar sale del dataset (loader.dataset.coco), no del target augmentado.
+    """
+    import torch
+
+    from cardd.data.build import build_dataloader
+    from cardd.evaluation.coco_eval import predictions_to_coco_results
+
+    device = _pick_device(cfg)
+    loader = build_dataloader(cfg, split)
+    dataset = loader.dataset  # CarDDCocoDataset: expone .coco / .cat_id_to_label / .label_to_name
+    label_to_cat_id = {label: cid for cid, label in dataset.cat_id_to_label.items()}
+    model = _build_eval_model(cfg, weights, device)
+    model.eval()
+
+    coco_results: list[dict] = []
+    image_ids: list[int] = []
+    with torch.inference_mode():
+        for images, targets in loader:
+            images = [img.to(device) for img in images]
+            outputs = model(images)  # C2: list[dict] por imagen
+            for out, tgt in zip(outputs, targets):
+                img_id = int(tgt["image_id"])
+                # serializa YA a RLE; la máscara densa de esta imagen se libera al
+                # salir del scope, no se acumula
+                coco_results.extend(predictions_to_coco_results([out], [img_id], label_to_cat_id))
+                image_ids.append(img_id)
+    logger.info("inferencia '%s': %d imagenes, %d detecciones",
+                split, len(image_ids), len(coco_results))
+    return dataset, coco_results, image_ids
+
+
+def _format_c5(c5: dict) -> str:
+    """Resumen legible de una linea por metrica para stdout."""
+    head = (
+        f"mask_AP={c5['mask_AP']:.4f}  box_AP={c5['box_AP']:.4f}  "
+        f"AP50={c5['AP50']:.4f}  AP75={c5['AP75']:.4f}"
+    )
+    sc = c5["per_scale"]
+    scale = f"APS={sc['APS']:.4f}  APM={sc['APM']:.4f}  APL={sc['APL']:.4f}"
+    per_cls = "\n".join(
+        f"    {name:<16} mask_AP={v['mask_AP']:.4f}  box_AP={v['box_AP']:.4f}"
+        for name, v in c5["per_class"].items()
+    )
+    return f"{head}\n  {scale}\n  per_class:\n{per_cls}"
 
 
 def main() -> None:
-    ap = argparse.ArgumentParser(description="Evalúa un checkpoint sobre un split → C5.")
-    ap.add_argument("--config", required=True)
-    ap.add_argument("--weights", required=True)
-    ap.add_argument("--split", default="val", choices=["train", "val", "test"])
-    ap.add_argument("--overfit", type=int, default=0,
-                    help="smoke end-to-end: evalúa solo las primeras N imágenes (AP≈1 esperado)")
-    ap.add_argument("--out", default=None, help="ruta JSON de salida para el dict C5")
+    ap = argparse.ArgumentParser(description="Evalua un checkpoint y emite C5.")
+    ap.add_argument("--config", required=True, help="ruta a la config YAML")
+    ap.add_argument("--weights", required=True, help="checkpoint a evaluar")
+    ap.add_argument("--split", default="test", help="split a evaluar (default: test)")
+    ap.add_argument("--out", default=None, help="ruta del JSON C5 (default: output.dir)")
     args = ap.parse_args()
 
     cfg = load_config(args.config)
-    set_seed(int(get(cfg, "seed", 0)))  # mismo seed que train → mismas N imágenes en --overfit
-    log = get_logger("cardd.evaluate")
-    device = get(cfg, "train.device", "cuda")
+    set_seed(get(cfg, "seed", 0))
+    logger = get_logger("cardd.evaluate")
 
-    loader = build_dataloader(cfg, args.split)
-    model = build_eval_model(cfg, weights=args.weights, device=device)
-    preds, image_ids = run_inference(model, loader, device=device,
-                                     max_images=args.overfit or None)
+    dataset, coco_results, image_ids = collect_coco_results(cfg, args.split, args.weights, logger)
+    cat_id_to_name = {
+        cid: dataset.label_to_name[label] for cid, label in dataset.cat_id_to_label.items()
+    }
+    c5 = evaluate(dataset.coco, coco_results, cat_id_to_name, image_ids=image_ids)
 
-    # E: C2 → C5. El GT sale del JSON COCO del dataset (ds.coco); image_ids
-    # restringe la evaluación a las imágenes realmente inferidas.
-    c5 = evaluate_from_dataset(loader.dataset, preds, image_ids)
+    print(_format_c5(c5))
 
-    print(json.dumps(c5, indent=2, default=float))
-    out = args.out or str(
-        Path(get(cfg, "train.output_dir", "outputs/run")) / f"metrics_{args.split}.json"
-    )
-    Path(out).parent.mkdir(parents=True, exist_ok=True)
-    Path(out).write_text(json.dumps(c5, indent=2, default=float))
-    log.info("C5 → %s · mask_AP=%s", out, c5.get("mask_AP"))
+    out = Path(args.out) if args.out else Path(get(cfg, "output.dir", "outputs")) / f"eval_{args.split}.json"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps(c5, indent=2, ensure_ascii=False))
+    logger.info("C5 guardado en %s", out)
 
 
 if __name__ == "__main__":

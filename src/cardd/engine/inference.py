@@ -10,6 +10,19 @@ junta las predicciones C2 + ``image_ids`` para pasárselas a E
 
 La serialización a COCO la hace E; M solo entrega los tensores nativos del
 detector (boxes xyxy, scores, labels 1..N, masks [K,1,H,W] en [0,1]).
+
+--- Fase val/test con tiling ---
+
+El camino tileado (``run_tiled_inference_coco_results``) fusiona las detecciones
+por tile con la estrategia de GRAFO DE MASCARAS (``cardd.engine.tile_fusion``):
+empareja por solape de mascara (misma clase + tiles distintos), promedia las
+mascaras blandas del grupo y deriva la caja de la mascara fusionada. Reemplaza a
+WBF (fusion de cajas), que no daba el resultado esperado en segmentacion.
+
+Estas funciones son ADITIVAS: no tocan ninguna firma del motor base ni el camino
+sin tiling (``build_eval_model`` y ``run_inference*`` siguen igual), asi que
+volver al modelo plano no requiere nada. El camino tileado se consume desde
+``scripts/evaluate_tiled.py``.
 """
 
 from __future__ import annotations
@@ -19,6 +32,7 @@ from pathlib import Path
 import torch
 from torch import nn
 
+from cardd.engine.tile_fusion import fuse_tile_predictions_graph, _fusion_cfg
 from cardd.utils.config import get
 from cardd.utils.logging import get_logger
 from cardd.models.detectors.mask_rcnn import build_detector
@@ -131,6 +145,163 @@ def run_inference_coco_results(
             coco_results.extend(predictions_to_coco_results([pred], [iid], label_to_cat_id))
             image_ids.append(iid)
             # `pred` (incluida la máscara densa) se libera al pasar de iteración
+    return coco_results, image_ids
+
+
+# --------------------------------------------------------------------------- #
+# Tiling (val/test) — fusión por grafo de máscaras; no afecta el motor base    #
+# --------------------------------------------------------------------------- #
+
+def resolve_tile_batch_size(cfg) -> int | None:
+    """Tamaño del sub-batch para el forward por tile (trade-off VRAM/velocidad).
+
+    - ``eval.tile_batch_size`` explícito en config → se usa tal cual (``0`` o
+      valores ``<=0`` significan "todos los tiles juntos", ver abajo).
+    - Sin esa clave (default) → **hereda ``data.tiling.n``**: procesa de a
+      ``n`` tiles por forward (una "fila" de la grilla n×n) en vez de los
+      ``n²`` juntos.
+    - Si tampoco hay ``data.tiling.n`` → ``None`` = todos los tiles de la
+      imagen en un solo forward (comportamiento previo a este knob).
+
+    Nunca cambia el resultado final (mismas detecciones, misma fusión) — solo
+    el pico de VRAM y la velocidad del forward.
+    """
+    explicit = get(cfg, "eval.tile_batch_size", None)
+    if explicit is not None:
+        explicit = int(explicit)
+        return explicit if explicit > 0 else None
+    n = get(cfg, "data.tiling.n", None)
+    return int(n) if n else None
+
+
+def run_tiles_chunked(
+    model: nn.Module,
+    tiles: list[torch.Tensor],
+    chunk_size: int | None,
+    device: torch.device,
+    use_amp: bool,
+) -> list[dict]:
+    """Corre ``model`` sobre ``tiles`` en sub-batches de ``chunk_size`` (o todos
+    juntos si es ``None``/``>= len(tiles)``). Mismo resultado que un solo
+    forward con todos los tiles — solo cambia cuánta VRAM pico se usa."""
+    if not chunk_size or chunk_size >= len(tiles):
+        with torch.autocast(device_type=device.type, enabled=use_amp):
+            return model([t.to(device, non_blocking=True) for t in tiles])
+    outputs: list[dict] = []
+    for i in range(0, len(tiles), chunk_size):
+        chunk = [t.to(device, non_blocking=True) for t in tiles[i : i + chunk_size]]
+        with torch.autocast(device_type=device.type, enabled=use_amp):
+            outputs.extend(model(chunk))
+    return outputs
+
+
+def reproject_boxes(boxes: torch.Tensor, offset: tuple[int, int], scale: float = 1.0) -> torch.Tensor:
+    """box_tile -> box_entera, según el contrato de D: ``box/scale + (x0,y0)``."""
+    x0, y0 = offset
+    out = boxes.detach().to(torch.float32).clone()
+    if out.numel():
+        out[:, 0::2] = out[:, 0::2] / scale + x0
+        out[:, 1::2] = out[:, 1::2] / scale + y0
+    return out
+
+
+@torch.no_grad()
+def concat_tile_predictions_no_fusion(tile_outputs: list[dict], tile_metas: list[dict]) -> dict:
+    """Baseline de ablación (fusión vs. sin-fusión). Reproyecta TODAS las
+    detecciones de todos los tiles a coords de imagen entera y las concatena
+    **sin fusionar** — los duplicados de costura quedan tal cual (doble conteo).
+
+    Sirve para aislar el efecto de la fusión: si esta salida y la de
+    ``fuse_tile_predictions_graph`` dan un AP igual de bajo, el problema NO es la
+    fusión (es reproyección/geometría o las detecciones por tile). Si esta da
+    razonable y la fusión lo derrumba, el problema está en la fusión.
+
+    Mismo formato de salida C2 (boxes/scores/labels/masks[K,1,H,W] en coords
+    enteras). Cada detección conserva su propia máscara, pegada en el offset de
+    su tile.
+    """
+    W, H = tile_metas[0]["orig_size"]
+
+    boxes_parts, scores_parts, labels_parts = [], [], []
+    mask_lookup: list[tuple[dict, torch.Tensor]] = []
+
+    for out, meta in zip(tile_outputs, tile_metas):
+        n = out["boxes"].shape[0]
+        if n == 0:
+            continue
+        boxes_parts.append(reproject_boxes(out["boxes"], meta["offset"], meta.get("scale", 1.0)))
+        scores_parts.append(out["scores"].detach().to(torch.float32))
+        labels_parts.append(out["labels"].detach().to(torch.int64))
+        for k in range(n):
+            mask_lookup.append((meta, out["masks"][k]))
+
+    if not boxes_parts:
+        return {
+            "boxes": torch.zeros(0, 4),
+            "scores": torch.zeros(0),
+            "labels": torch.zeros(0, dtype=torch.int64),
+            "masks": torch.zeros(0, 1, H, W),
+        }
+
+    boxes = torch.cat(boxes_parts)
+    scores = torch.cat(scores_parts)
+    labels = torch.cat(labels_parts)
+
+    masks_out = torch.zeros(len(mask_lookup), 1, H, W, dtype=torch.float32)
+    for i, (meta, tile_mask) in enumerate(mask_lookup):
+        x0, y0 = meta["offset"]
+        tw, th = meta["tile_size"]
+        masks_out[i, 0, y0 : y0 + th, x0 : x0 + tw] = tile_mask[0]
+
+    return {
+        "boxes": boxes,
+        "scores": scores,
+        "labels": labels,
+        "masks": masks_out,
+    }
+
+
+@torch.no_grad()
+def run_tiled_inference_coco_results(
+    model: nn.Module,
+    tile_dataloader,
+    dataset,
+    cfg,
+    device: str | torch.device = "cuda",
+    amp: bool = True,
+):
+    """Análogo tileado de ``run_inference_coco_results``: memory-safe, RLE por
+    imagen. Cada batch de ``tile_dataloader`` = TODOS los tiles de UNA imagen
+    padre (collate de D, ``tile_collate``). Por batch: inferencia por tile →
+    fusión por grafo de máscaras → C2 de imagen entera → serializa a
+    COCO-results → suelta la máscara densa antes del próximo batch.
+
+    ``dataset`` es el dataset de tiles de D (``CarDDTileDataset``); solo se usa
+    para ``cat_id_to_label`` (mismo contrato que ``run_inference_coco_results``).
+    ``cfg`` es la config del proyecto, de donde se leen los knobs de fusión
+    (``eval.fusion.*`` — ver ``_fusion_cfg``; todos tienen default) y el tamaño
+    de sub-batch por tile (``eval.tile_batch_size`` — ver
+    ``resolve_tile_batch_size``; por default hereda ``data.tiling.n``).
+    """
+    from cardd.evaluation.coco_eval import predictions_to_coco_results
+
+    device = torch.device(device)
+    model.eval()
+    use_amp = amp and device.type == "cuda"
+    fusion_cfg = _fusion_cfg(cfg)
+    chunk_size = resolve_tile_batch_size(cfg)
+    label_to_cat_id = {label: cid for cid, label in dataset.cat_id_to_label.items()}
+
+    coco_results: list[dict] = []
+    image_ids: list[int] = []
+    for tiles, metas in tile_dataloader:  # collate de D: todos los tiles de UNA imagen
+        outputs = run_tiles_chunked(model, list(tiles), chunk_size, device, use_amp)
+        outputs_cpu = [{k: v.detach().cpu() for k, v in o.items()} for o in outputs]
+        fused = fuse_tile_predictions_graph(outputs_cpu, list(metas), fusion_cfg)
+        img_id = int(metas[0]["image_id"])
+        coco_results.extend(predictions_to_coco_results([fused], [img_id], label_to_cat_id))
+        image_ids.append(img_id)
+        del outputs, outputs_cpu, fused  # el canvas (H,W) de esta imagen se libera ya
     return coco_results, image_ids
 
 

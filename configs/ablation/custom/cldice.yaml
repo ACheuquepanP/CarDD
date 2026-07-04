@@ -1,12 +1,11 @@
-# CarDD · configs/ablation/custom/cldice.yaml
-# Fila custom §5.2 (Equipo C, Fase B) · Contrato C4·C3
-# Delta sobre a0: detector con término topológico soft-clDice sumado al loss de
-# máscara (clave aparte loss_mask_cldice). Un cambio por fila. C2 intacto.
-_base_: ../a0_baseline.yaml
-
+# CarDD · ablación 1-a-1 · base(DCN-neck & cascade & ms) + clDice solo
+_base_: base_dcnNECK_cascade_ms.yaml
 model:
   detector:
-    name: mask_rcnn_cldice
-    cldice:
-      weight: 1.0      # peso del término clDice
-      iters: 3         # iteraciones de la skeletonización soft
+    name: cascade_mask_rcnn_composed
+    loss_mods:
+      - {name: cldice, weight: 1.0, iters: 3}
+    pointrend: False              # explícito
+
+output:
+  dir: outputs/abl_cldice
