@@ -1,0 +1,3 @@
+_base_: ../custom/base_dcnNECK_cascade.yaml
+output:
+  dir: /content/drive/MyDrive/cardd_ckpts/abl_base

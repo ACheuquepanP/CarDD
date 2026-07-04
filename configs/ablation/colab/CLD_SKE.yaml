@@ -1,0 +1,3 @@
+_base_: ../custom/cldice_skeleton.yaml
+output:
+  dir: /content/drive/MyDrive/cardd_ckpts/abl_CLD_SKE
