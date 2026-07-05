@@ -7,32 +7,64 @@ Loop de entrenamiento bajo el presupuesto de 8 GB (RTX 5060):
   - **Acumulación de gradiente**: batch físico chico (1–2) que emula uno mayor.
   - **Schedule configurable y fijo** entre filas de ablación (higiene de P).
 
+Multi-GPU (Kaggle T4 x2): soporta **DistributedDataParallel** (DDP), la forma
+correcta de multi-GPU para detección torchvision (DataParallel NO funciona con
+entradas tipo lista). Se activa lanzando con torchrun:
+
+    torchrun --standalone --nproc_per_node=2 scripts/train.py --config ...
+
+Sin torchrun (python normal) corre en 1 GPU/CPU exactamente como antes.
+
 Guarda checkpoints ``{"model","optimizer","epoch","step","cfg"}`` que
 ``engine.inference.build_eval_model`` sabe leer (lee la clave ``"model"``).
+Los checkpoints se guardan SIN prefijo ``module.`` → compatibles con 1 GPU.
 """
 
 from __future__ import annotations
 
+import logging
 import math
+from contextlib import nullcontext
 from pathlib import Path
 
 import torch
+import torch.distributed as dist
 from torch import nn
+from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.tensorboard import SummaryWriter
 
 from cardd.utils.config import get
 from cardd.utils.logging import get_logger
 
 
+# --------------------------- helpers distribuidos ---------------------------
+
+def dist_is_active() -> bool:
+    """True si corremos bajo torchrun con el process group inicializado."""
+    return dist.is_available() and dist.is_initialized()
+
+
+def dist_rank() -> int:
+    return dist.get_rank() if dist_is_active() else 0
+
+
+def is_main_process() -> bool:
+    """Rank 0: el único que guarda checkpoints, valida y escribe TensorBoard."""
+    return dist_rank() == 0
+
+
 def _unwrap(model: nn.Module) -> nn.Module:
-    """Devuelve el modelo real, quitando el envoltorio DataParallel si existe.
+    """Devuelve el modelo real, quitando DDP/DataParallel si envuelven.
 
-    Multi-GPU: cuando el modelo va envuelto en ``nn.DataParallel``, sus pesos y
-    métodos viven en ``model.module``. Este helper centraliza el desenvoltorio para
-    que el guardado/carga de checkpoints produzca claves SIN el prefijo ``module.``
-    → un checkpoint entrenado en 2 GPUs se carga tal cual en 1 GPU."""
-    return model.module if isinstance(model, nn.DataParallel) else model
+    Centraliza el desenvoltorio para que guardar/cargar checkpoints produzca
+    claves SIN el prefijo ``module.`` → un checkpoint entrenado en 2 GPUs se
+    carga tal cual en 1 GPU."""
+    if isinstance(model, (DDP, nn.DataParallel)):
+        return model.module
+    return model
 
+
+# ----------------------------------------------------------------------------
 
 def build_optimizer(cfg, model: nn.Module) -> torch.optim.Optimizer:
     name = str(get(cfg, "train.optimizer.name", "adamw")).lower()
@@ -78,30 +110,36 @@ class Trainer:
     guarda ``best.pth`` con el mayor ``mask_AP`` de val. ``test`` no participa acá:
     C lo evalúa al cierre con ``best.pth`` (set no visto).
 
-    Multi-GPU (Kaggle T4 x2): si hay >1 GPU CUDA disponible, el modelo se envuelve
-    automáticamente en ``nn.DataParallel`` y cada batch se reparte entre las GPUs.
-    Para desactivarlo aunque haya 2 GPUs, exporta ``CUDA_VISIBLE_DEVICES=0`` antes
-    de lanzar el entrenamiento.
+    DDP: si el process group está inicializado (torchrun), el modelo se envuelve
+    en DistributedDataParallel. Cada proceso maneja UNA GPU. Solo rank 0 valida,
+    guarda checkpoints y escribe TensorBoard. La validación corre con el modelo
+    desenvuelto mientras los otros ranks esperan en un barrier.
     """
 
     def __init__(self, cfg, model: nn.Module, train_loader, val_loader=None) -> None:
         self.cfg = cfg
         self.log = get_logger("cardd.engine.trainer")
+        self.is_main = is_main_process()
+        if not self.is_main:
+            # ranks != 0: silenciar INFO para no duplicar cada línea del log
+            self.log.setLevel(logging.WARNING)
+
         self.device = torch.device(get(cfg, "train.device", "cuda"))
         self.model = model.to(self.device)
 
-        # --- Multi-GPU (DataParallel) -------------------------------------
-        # Si hay más de una GPU CUDA visible, repartir cada batch entre ellas.
-        # El modelo real sigue accesible vía _unwrap() para guardar/cargar pesos
-        # sin el prefijo "module." → checkpoints compatibles con 1 GPU.
-        self.n_gpus = torch.cuda.device_count() if self.device.type == "cuda" else 0
-        if self.n_gpus > 1:
-            self.log.info("multi-GPU: usando %d GPUs (DataParallel)", self.n_gpus)
-            self.model = nn.DataParallel(self.model)
-        # ------------------------------------------------------------------
+        # --- DDP: envolver si torchrun inicializó el process group -----------
+        self.distributed = dist_is_active()
+        if self.distributed:
+            self.model = DDP(
+                self.model,
+                device_ids=[self.device.index] if self.device.type == "cuda" else None,
+            )
+            self.log.info("DDP activo: world_size=%d · este proceso usa %s",
+                          dist.get_world_size(), self.device)
+        # ---------------------------------------------------------------------
 
         self.loader = train_loader
-        self.val_loader = val_loader
+        self.val_loader = val_loader  # en DDP solo rank 0 recibe val_loader
 
         self.epochs = int(get(cfg, "train.epochs", 1))
         self.accum = max(1, int(get(cfg, "train.grad_accum_steps", 1)))
@@ -126,7 +164,8 @@ class Trainer:
         self.optimizer = build_optimizer(cfg, self.model)
         self.scheduler = build_scheduler(cfg, self.optimizer, self.total_steps)
         self.scaler = torch.amp.GradScaler(device=self.device.type, enabled=self.amp)
-        self.tb = SummaryWriter(str(self.out_dir / "tb"))
+        # TensorBoard solo en el proceso principal (evita escrituras duplicadas)
+        self.tb = SummaryWriter(str(self.out_dir / "tb")) if self.is_main else None
         self.step = 0
         self.start_epoch = 0  # se adelanta si se hace resume()
 
@@ -136,6 +175,8 @@ class Trainer:
         A diferencia de resume(), el lr vuelve a subir/decae segun el schedule de
         ESTA config -> sirve para extender con un schedule corto y exprimir lo que
         quedo. optimizer/scheduler/epoca/step del checkpoint se ignoran a proposito.
+
+        DDP: cada rank carga el mismo archivo → pesos idénticos en todos.
         """
         ckpt = torch.load(ckpt_path, map_location=self.device)
         _unwrap(self.model).load_state_dict(ckpt["model"])
@@ -148,8 +189,8 @@ class Trainer:
         """Resume ESTRICTO: restaura modelo + optimizer + scheduler + época + best.
 
         Mismo modelo (load_state_dict estricto: si el backbone difiere, falla ruidoso
-        — eso es correcto, no se reanuda otra arquitectura). Pensado para Colab: si la
-        sesión se corta, `--resume outputs/.../last.pth` continúa exactamente donde iba.
+        — eso es correcto, no se reanuda otra arquitectura). Pensado para sesiones
+        que se cortan: `--resume outputs/.../last.pth` continúa exactamente donde iba.
         """
         ckpt = torch.load(ckpt_path, map_location=self.device)
         _unwrap(self.model).load_state_dict(ckpt["model"])
@@ -173,6 +214,18 @@ class Trainer:
         ]
         return images, targets
 
+    def _should_stop(self, local_decision: bool) -> bool:
+        """Sincroniza la decisión de early-stopping entre ranks (rank 0 decide).
+
+        Sin esto, rank 0 podría cortar y los demás seguir → deadlock en el
+        siguiente allreduce. En single-GPU devuelve la decisión tal cual."""
+        if not self.distributed:
+            return local_decision
+        flag = torch.tensor(1 if (self.is_main and local_decision) else 0,
+                            device=self.device)
+        dist.broadcast(flag, src=0)
+        return bool(flag.item())
+
     def train(self) -> Path:
         self.model.train()
         self.log.info(
@@ -189,32 +242,49 @@ class Trainer:
         )
         last = self.out_dir / "last.pth"  # default si el loop no corre (resume ya completo)
         for epoch in range(self.start_epoch, self.epochs):
+            # DDP: el sampler necesita la época para barajar distinto cada vez
+            sampler = getattr(self.loader, "sampler", None)
+            if self.distributed and hasattr(sampler, "set_epoch"):
+                sampler.set_epoch(epoch)
+
             self._run_epoch(epoch)
 
             # validación SIN gradiente + selección de best.pth por mask_AP de val
-            if self.val_loader is not None and (epoch + 1) % self.val_interval == 0:
-                val_ap = self._validate(epoch)
-                improved = val_ap > self.best_metric + self.es_min_delta
-                if val_ap > self.best_metric:
-                    self.best_metric = val_ap
-                    self._save(self.out_dir / "best.pth", epoch)
-                    self.log.info("nuevo best.pth · val mask_AP=%.4f (epoch %d)", val_ap, epoch)
-                # early stopping OPCIONAL (default OFF: no corta, best.pth ya queda guardado)
-                if self.es_enabled:
-                    self.es_counter = 0 if improved else self.es_counter + 1
-                    if self.es_counter >= self.es_patience:
-                        self.log.info("early stopping en epoch %d (%d vals sin mejora > %.4g)",
-                                      epoch, self.es_patience, self.es_min_delta)
-                        # last.pth cada época: se sobrescribe → reanudable si Colab corta
-                        numbered = bool(self.ckpt_interval and (epoch + 1) % self.ckpt_interval == 0)
-                        last = self.save_checkpoint(epoch, numbered=numbered)
-                        break
+            # DDP: SOLO rank 0 valida (val_loader es None en los demás); los otros
+            # ranks esperan en el barrier a que rank 0 termine.
+            stop_now = False
+            if (epoch + 1) % self.val_interval == 0:
+                if self.val_loader is not None:
+                    val_ap = self._validate(epoch)
+                    improved = val_ap > self.best_metric + self.es_min_delta
+                    if val_ap > self.best_metric:
+                        self.best_metric = val_ap
+                        self._save(self.out_dir / "best.pth", epoch)
+                        self.log.info("nuevo best.pth · val mask_AP=%.4f (epoch %d)",
+                                      val_ap, epoch)
+                    # early stopping OPCIONAL (default OFF)
+                    if self.es_enabled:
+                        self.es_counter = 0 if improved else self.es_counter + 1
+                        if self.es_counter >= self.es_patience:
+                            self.log.info(
+                                "early stopping en epoch %d (%d vals sin mejora > %.4g)",
+                                epoch, self.es_patience, self.es_min_delta)
+                            stop_now = True
+                if self.distributed:
+                    dist.barrier()  # sincroniza: nadie avanza hasta que rank 0 valide
 
-            # last.pth cada época (estado completo): reanudable si Colab corta.
+            # la decisión de cortar se sincroniza entre ranks (evita deadlock)
+            if self._should_stop(stop_now):
+                numbered = bool(self.ckpt_interval and (epoch + 1) % self.ckpt_interval == 0)
+                last = self.save_checkpoint(epoch, numbered=numbered)
+                break
+
+            # last.pth cada época (estado completo): reanudable si la sesión corta.
             # numbered opcional (ckpt_interval>0) si además se quiere histórico.
             numbered = bool(self.ckpt_interval and (epoch + 1) % self.ckpt_interval == 0)
             last = self.save_checkpoint(epoch, numbered=numbered)
-        self.tb.close()
+        if self.tb is not None:
+            self.tb.close()
         return last
 
     def _run_epoch(self, epoch: int) -> None:
@@ -223,18 +293,21 @@ class Trainer:
         for i, (images, targets) in enumerate(self.loader):
             images, targets = self._to_device(images, targets)
 
-            with torch.autocast(device_type=self.device.type, enabled=self.amp):
-                loss_dict = self.model(images, targets)  # train mode → dict de losses
-                # Multi-GPU: DataParallel devuelve un tensor por GPU en cada loss
-                # (shape [n_gpus]) en vez de un escalar. Se reduce con .mean() para
-                # volver a un escalar antes de sumar. En 1 GPU, .mean() sobre un
-                # escalar es no-op → seguro en ambos casos.
-                loss = sum(v.mean() for v in loss_dict.values())
-
-            # se divide por accum para promediar el gradiente del micro-batch
-            self.scaler.scale(loss / self.accum).backward()
-
             is_step = (i + 1) % self.accum == 0 or (i + 1) == n
+
+            # DDP + grad-accum: no_sync() evita el allreduce de gradientes en los
+            # micro-batches intermedios (solo sincroniza en el step real).
+            # Con accum=8 esto ahorra 7 de cada 8 comunicaciones entre GPUs.
+            sync_ctx = (self.model.no_sync()
+                        if (self.distributed and not is_step) else nullcontext())
+
+            with sync_ctx:
+                with torch.autocast(device_type=self.device.type, enabled=self.amp):
+                    loss_dict = self.model(images, targets)  # train mode → dict de losses
+                    loss = sum(loss_dict.values())
+                # se divide por accum para promediar el gradiente del micro-batch
+                self.scaler.scale(loss / self.accum).backward()
+
             if is_step:
                 if self.grad_clip:
                     self.scaler.unscale_(self.optimizer)
@@ -251,10 +324,11 @@ class Trainer:
                     loss_v = float(loss.detach())
                     self.log.info("epoch %d · step %d · loss %.4f · lr %.2e",
                                   epoch, self.step, loss_v, lr)
-                    self.tb.add_scalar("train/loss", loss_v, self.step)
-                    for k, v in loss_dict.items():
-                        self.tb.add_scalar(f"train/{k}", float(v.mean().detach()), self.step)
-                    self.tb.add_scalar("train/lr", lr, self.step)
+                    if self.tb is not None:
+                        self.tb.add_scalar("train/loss", loss_v, self.step)
+                        for k, v in loss_dict.items():
+                            self.tb.add_scalar(f"train/{k}", float(v.detach()), self.step)
+                        self.tb.add_scalar("train/lr", lr, self.step)
 
     @torch.no_grad()
     def _validate(self, epoch: int) -> float:
@@ -266,9 +340,7 @@ class Trainer:
         cierre, no para seleccionar best.pth) y ``image_ids`` = todas las inferidas
         (incluye las vacías como recall miss).
 
-        Multi-GPU: la inferencia se hace con el modelo REAL (sin DataParallel), ya
-        que el loop de inference de E procesa imagen a imagen y no necesita el
-        reparto por batch. Se pasa _unwrap(self.model).
+        DDP: se ejecuta SOLO en rank 0, con el modelo desenvuelto (sin DDP).
         """
         from cardd.engine.inference import run_inference_coco_results
         from cardd.evaluation.coco_eval import evaluate
@@ -290,14 +362,18 @@ class Trainer:
         val_ap = float(c5.get("mask_AP", float("nan")))
         box_ap = float(c5.get("box_AP", float("nan")))
         self.log.info("val · epoch %d · mask_AP=%.4f · box_AP=%.4f", epoch, val_ap, box_ap)
-        self.tb.add_scalar("val/mask_AP", val_ap, self.step)
-        self.tb.add_scalar("val/box_AP", box_ap, self.step)
+        if self.tb is not None:
+            self.tb.add_scalar("val/mask_AP", val_ap, self.step)
+            self.tb.add_scalar("val/box_AP", box_ap, self.step)
         return val_ap
 
     def _save(self, path: Path, epoch: int) -> Path:
+        # DDP: solo rank 0 escribe a disco (los pesos son idénticos en todos)
+        if not self.is_main:
+            return path
         torch.save(
             {
-                # _unwrap → guarda SIN el prefijo "module." de DataParallel,
+                # _unwrap → guarda SIN el prefijo "module." de DDP/DataParallel,
                 # para que el checkpoint se cargue igual en 1 o 2 GPUs.
                 "model": _unwrap(self.model).state_dict(),
                 "optimizer": self.optimizer.state_dict(),
@@ -315,7 +391,8 @@ class Trainer:
         last = self._save(self.out_dir / "last.pth", epoch)  # alias estable para evaluate/inference
         if numbered:
             self._save(self.out_dir / f"checkpoint_epoch{epoch:03d}.pth", epoch)
-        self.log.info("checkpoint guardado (epoch %d) → %s", epoch, last)
+        if self.is_main:
+            self.log.info("checkpoint guardado (epoch %d) → %s", epoch, last)
         return last
 
 
