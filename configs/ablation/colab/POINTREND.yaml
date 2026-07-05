@@ -1,4 +1,4 @@
 # configs/colab/pointrend_colab.yaml
 _base_: ../custom/pointrend.yaml
 output:
-  dir: /content/drive/MyDrive/cardd_ckpts/abl_pointrend
+  dir: /kaggle/working/cardd_ckpts/abl_pointrend
