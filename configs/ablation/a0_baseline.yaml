@@ -13,6 +13,17 @@ _base_: ../backbones/convnextv2_tiny.yaml
 output:
   dir: outputs/a0_baseline
 
+train:
+  epochs: 30
+  batch_size: 2               # físico (8 GB)
+  grad_accum_steps: 8         # batch efectivo = 16
+  optimizer:
+    name: adamw
+    lr: 0.0035
+    weight_decay: 0.01
+  scheduler:
+    name: cosine
+    warmup_steps: 1000
 # Unblock temporal: base.yaml trae estas claves vacías (→ None) y revientan en
 # data/build.py. Lo correcto es que P las cure en base (son constantes globales);
 # mientras tanto las fijo acá. Quitar cuando base.yaml tenga valor.
