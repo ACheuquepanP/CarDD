@@ -16,7 +16,7 @@ data:
   image_max_size: 1333
   image_mean: [0.485, 0.456, 0.406]   # ImageNet (ConvNeXt-V2 preentrenado), escala [0,1]
   image_std:  [0.229, 0.224, 0.225]
-  num_workers: 2
+  num_workers: 4
   # Tiling de val/test (nuevo, D — solo lo usa scripts/evaluate_tiled.py; el
   # camino sin tiling ignora estas claves). Defaults ya viven en tiling.py, se
   # declaran aquí explícitos para que C los pueda tocar sin editar código.
@@ -35,8 +35,8 @@ model:
 # --- Entrenamiento: schedule = constante de proyecto, FIJO entre filas ---
 train:
   epochs: 15
-  batch_size: 1               # físico (8 GB)
-  grad_accum_steps: 16         # batch efectivo = 16
+  batch_size: 2               # físico (8 GB)
+  grad_accum_steps: 8         # batch efectivo = 16
   grad_clip: 1.0              # clip de norma del gradiente
   amp: true                   # precisión mixta
   optimizer:
@@ -45,7 +45,7 @@ train:
     weight_decay: 0.01
   scheduler:
     name: cosine
-    warmup_steps: 500
+    warmup_steps: 750
 
 # --- Evaluación (Equipo E, Fase 2) ---
 eval:
