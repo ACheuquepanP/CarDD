@@ -24,6 +24,16 @@ from cardd.utils.config import get
 from cardd.utils.logging import get_logger
 
 
+def _unwrap(model: nn.Module) -> nn.Module:
+    """Devuelve el modelo real, quitando el envoltorio DataParallel si existe.
+
+    Multi-GPU: cuando el modelo va envuelto en ``nn.DataParallel``, sus pesos y
+    métodos viven en ``model.module``. Este helper centraliza el desenvoltorio para
+    que el guardado/carga de checkpoints produzca claves SIN el prefijo ``module.``
+    → un checkpoint entrenado en 2 GPUs se carga tal cual en 1 GPU."""
+    return model.module if isinstance(model, nn.DataParallel) else model
+
+
 def build_optimizer(cfg, model: nn.Module) -> torch.optim.Optimizer:
     name = str(get(cfg, "train.optimizer.name", "adamw")).lower()
     lr = float(get(cfg, "train.optimizer.lr", 1e-4))
@@ -67,6 +77,11 @@ class Trainer:
     epochs se evalúa val SIN gradiente (el modelo nunca entrena sobre val) y se
     guarda ``best.pth`` con el mayor ``mask_AP`` de val. ``test`` no participa acá:
     C lo evalúa al cierre con ``best.pth`` (set no visto).
+
+    Multi-GPU (Kaggle T4 x2): si hay >1 GPU CUDA disponible, el modelo se envuelve
+    automáticamente en ``nn.DataParallel`` y cada batch se reparte entre las GPUs.
+    Para desactivarlo aunque haya 2 GPUs, exporta ``CUDA_VISIBLE_DEVICES=0`` antes
+    de lanzar el entrenamiento.
     """
 
     def __init__(self, cfg, model: nn.Module, train_loader, val_loader=None) -> None:
@@ -74,6 +89,17 @@ class Trainer:
         self.log = get_logger("cardd.engine.trainer")
         self.device = torch.device(get(cfg, "train.device", "cuda"))
         self.model = model.to(self.device)
+
+        # --- Multi-GPU (DataParallel) -------------------------------------
+        # Si hay más de una GPU CUDA visible, repartir cada batch entre ellas.
+        # El modelo real sigue accesible vía _unwrap() para guardar/cargar pesos
+        # sin el prefijo "module." → checkpoints compatibles con 1 GPU.
+        self.n_gpus = torch.cuda.device_count() if self.device.type == "cuda" else 0
+        if self.n_gpus > 1:
+            self.log.info("multi-GPU: usando %d GPUs (DataParallel)", self.n_gpus)
+            self.model = nn.DataParallel(self.model)
+        # ------------------------------------------------------------------
+
         self.loader = train_loader
         self.val_loader = val_loader
 
@@ -112,7 +138,7 @@ class Trainer:
         quedo. optimizer/scheduler/epoca/step del checkpoint se ignoran a proposito.
         """
         ckpt = torch.load(ckpt_path, map_location=self.device)
-        self.model.load_state_dict(ckpt["model"])
+        _unwrap(self.model).load_state_dict(ckpt["model"])
         self.log.info(
             "warm-start desde %s - pesos cargados - schedule nuevo (epoch 0/%d, lr fresco)",
             ckpt_path, self.epochs,
@@ -126,7 +152,7 @@ class Trainer:
         sesión se corta, `--resume outputs/.../last.pth` continúa exactamente donde iba.
         """
         ckpt = torch.load(ckpt_path, map_location=self.device)
-        self.model.load_state_dict(ckpt["model"])
+        _unwrap(self.model).load_state_dict(ckpt["model"])
         if ckpt.get("optimizer") is not None:
             self.optimizer.load_state_dict(ckpt["optimizer"])
         if self.scheduler is not None and ckpt.get("scheduler") is not None:
@@ -199,7 +225,11 @@ class Trainer:
 
             with torch.autocast(device_type=self.device.type, enabled=self.amp):
                 loss_dict = self.model(images, targets)  # train mode → dict de losses
-                loss = sum(loss_dict.values())
+                # Multi-GPU: DataParallel devuelve un tensor por GPU en cada loss
+                # (shape [n_gpus]) en vez de un escalar. Se reduce con .mean() para
+                # volver a un escalar antes de sumar. En 1 GPU, .mean() sobre un
+                # escalar es no-op → seguro en ambos casos.
+                loss = sum(v.mean() for v in loss_dict.values())
 
             # se divide por accum para promediar el gradiente del micro-batch
             self.scaler.scale(loss / self.accum).backward()
@@ -223,7 +253,7 @@ class Trainer:
                                   epoch, self.step, loss_v, lr)
                     self.tb.add_scalar("train/loss", loss_v, self.step)
                     for k, v in loss_dict.items():
-                        self.tb.add_scalar(f"train/{k}", float(v.detach()), self.step)
+                        self.tb.add_scalar(f"train/{k}", float(v.mean().detach()), self.step)
                     self.tb.add_scalar("train/lr", lr, self.step)
 
     @torch.no_grad()
@@ -235,6 +265,10 @@ class Trainer:
         con ``with_boundary=False`` (val más rápida; el Boundary AP es para el
         cierre, no para seleccionar best.pth) y ``image_ids`` = todas las inferidas
         (incluye las vacías como recall miss).
+
+        Multi-GPU: la inferencia se hace con el modelo REAL (sin DataParallel), ya
+        que el loop de inference de E procesa imagen a imagen y no necesita el
+        reparto por batch. Se pasa _unwrap(self.model).
         """
         from cardd.engine.inference import run_inference_coco_results
         from cardd.evaluation.coco_eval import evaluate
@@ -244,10 +278,11 @@ class Trainer:
             cid: ds.label_to_name[label] for cid, label in ds.cat_id_to_label.items()
         }
 
-        self.model.eval()
+        eval_model = _unwrap(self.model)
+        eval_model.eval()
         coco_results, image_ids = run_inference_coco_results(
-            self.model, self.val_loader, ds, device=self.device, amp=self.amp)
-        self.model.train()
+            eval_model, self.val_loader, ds, device=self.device, amp=self.amp)
+        eval_model.train()
 
         c5 = evaluate(ds.coco, coco_results, cat_id_to_name,
                       image_ids=image_ids, with_boundary=False)
@@ -262,7 +297,9 @@ class Trainer:
     def _save(self, path: Path, epoch: int) -> Path:
         torch.save(
             {
-                "model": self.model.state_dict(),
+                # _unwrap → guarda SIN el prefijo "module." de DataParallel,
+                # para que el checkpoint se cargue igual en 1 o 2 GPUs.
+                "model": _unwrap(self.model).state_dict(),
                 "optimizer": self.optimizer.state_dict(),
                 "scheduler": self.scheduler.state_dict() if self.scheduler is not None else None,
                 "epoch": epoch,
