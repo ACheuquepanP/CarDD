@@ -16,6 +16,3 @@ output:
 # Unblock temporal: base.yaml trae estas claves vacías (→ None) y revientan en
 # data/build.py. Lo correcto es que P las cure en base (son constantes globales);
 # mientras tanto las fijo acá. Quitar cuando base.yaml tenga valor.
-data:
-  batch_size: 2       # físico 1-2 en 8 GB; si OOM en la corrida real, bajar a 1
-  num_workers: 4
