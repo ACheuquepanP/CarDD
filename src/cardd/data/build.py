@@ -62,6 +62,7 @@ def build_transforms(cfg, split: str):
     from torchvision.transforms import v2
 
     from cardd.data import transforms as _transforms  # noqa: F401
+    from cardd.data import transforms_paperms as _transforms_paperms  # noqa: F401
 
     return v2.Compose([TRANSFORMS.build(spec) for spec in specs])
 
