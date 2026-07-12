@@ -16,5 +16,12 @@ data:
       - {name: paper_hflip, p: 0.5}
       - {name: paper_multiscale, h_min: 640, h_max: 1200, width: 1333}
       
+model:
+  detector:
+    name: mask_rcnn_focal      # registrado en DETECTORS por mask_rcnn_focal.py
+    focal:
+      alpha: 0.5              # balanceo (matriz de ablación)
+      gamma: 2.0
+
 output:
   dir: outputs/multi_scaling
