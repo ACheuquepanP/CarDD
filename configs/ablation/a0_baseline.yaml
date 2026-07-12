@@ -17,5 +17,5 @@ output:
 # data/build.py. Lo correcto es que P las cure en base (son constantes globales);
 # mientras tanto las fijo acá. Quitar cuando base.yaml tenga valor.
 data:
-  batch_size: 2
+  batch_size: 1
   num_workers: 4
