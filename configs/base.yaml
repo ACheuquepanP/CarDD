@@ -36,8 +36,8 @@ model:
 # --- Entrenamiento: schedule = constante de proyecto, FIJO entre filas ---
 train:
   epochs: 30
-  batch_size: 1               # físico (8 GB)
-  grad_accum_steps: 16         # batch efectivo = 16
+  batch_size: 2               # físico (8 GB)
+  grad_accum_steps: 4         # batch efectivo = 16
   grad_clip: 1.0              # clip de norma del gradiente
   amp: true                   # precisión mixta
   optimizer:
