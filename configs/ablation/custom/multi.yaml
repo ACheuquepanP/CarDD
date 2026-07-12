@@ -16,13 +16,13 @@ data:
       - {name: paper_hflip, p: 0.5}
       - {name: paper_multiscale, h_min: 640, h_max: 1200, width: 1333}
       
-model:
-  detector:
-    name: cascade_mask_rcnn
-    num_stages: 3
-    iou_thresholds:     [0.5, 0.6, 0.7]     # umbral de positivos por stage
-    stage_loss_weights: [1.0, 0.5, 0.25]    # peso al plegar en loss_classifier/box_reg
-    bbox_reg_weights:                        # precisión creciente del BoxCoder por stage
+#model:
+ # detector:
+  #  name: cascade_mask_rcnn
+  #  num_stages: 3
+  #  iou_thresholds:     [0.5, 0.6, 0.7]     # umbral de positivos por stage
+  #   stage_loss_weights: [1.0, 0.5, 0.25]    # peso al plegar en loss_classifier/box_reg
+  #  bbox_reg_weights:                        # precisión creciente del BoxCoder por stage
       - [10.0, 10.0,  5.0,  5.0]
       - [20.0, 20.0, 10.0, 10.0]
       - [30.0, 30.0, 15.0, 15.0]
