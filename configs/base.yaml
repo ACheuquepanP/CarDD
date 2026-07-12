@@ -36,13 +36,13 @@ model:
 # --- Entrenamiento: schedule = constante de proyecto, FIJO entre filas ---
 train:
   epochs: 30
-  batch_size: 4               # físico (8 GB)
-  grad_accum_steps: 4         # batch efectivo = 16
+  batch_size: 2               # físico (8 GB)
+  grad_accum_steps: 8         # batch efectivo = 16
   grad_clip: 1.0              # clip de norma del gradiente
   amp: true                   # precisión mixta
   optimizer:
     name: adamw
-    lr: 0.0002
+    lr: 0.0003
     weight_decay: 0.005
   scheduler:
     name: cosine
