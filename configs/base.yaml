@@ -3,7 +3,7 @@
 # Las CONSTANTES de proyecto (schedule, mean/std) viven aquí; curarlas es
 # custodia de P, no un override por fila.
 
-seed: 32
+seed: 42
 deterministic: false
  
 # --- Datos (Equipo D afina en Fase 1) ---
