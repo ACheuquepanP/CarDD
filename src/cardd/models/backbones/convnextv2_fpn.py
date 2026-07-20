@@ -21,6 +21,9 @@ El módulo expone ``.out_channels`` (int, ancho del FPN) y su ``forward``
 devuelve un ``OrderedDict`` de features con claves ``"0".."3"`` + ``"pool"`` —
 exactamente los 5 niveles que espera el RPN por defecto de torchvision, misma
 convención que ``resnet_fpn_backbone``.
+
+Variantes sub-tiny (Equipo C, reevaluación): nano/pico/femto/atto para modelos
+más livianos. Solo nano tiene pesos a 384; el resto solo a 224 (fcmae_ft_in1k).
 """
 
 from __future__ import annotations
@@ -35,7 +38,9 @@ from torchvision.ops.feature_pyramid_network import LastLevelMaxPool
 
 from cardd.utils.registry import BACKBONES
 
-# variante → nombre de modelo timm. Extender acá para Base/Large (fase 6).
+# variante → nombre de modelo timm.
+# Resolución de pesos: tiny/base/nano tienen fine-tune a 384; pico/femto/atto
+# solo tienen 224 (fcmae_ft_in1k) — verificado con timm.list_models.
 _TIMM_NAMES = {
     "tiny":  "convnextv2_tiny.fcmae_ft_in22k_in1k_384",
     "base":  "convnextv2_base.fcmae_ft_in22k_in1k_384",
@@ -52,8 +57,8 @@ class ConvNeXtV2FPN(nn.Module):
     """Cuerpo ConvNeXt-V2 (timm) + cuello FPN (torchvision).
 
     Args:
-        variant: ``{"tiny","base","large"}`` (default ``"tiny"``; 8 GB → tiny).
-        pretrained: carga pesos ImageNet de timm. Para pesos NO-ImageNet, pasar
+        variant: clave de ``_TIMM_NAMES`` (default ``"tiny"``; 8 GB → tiny o menor).
+        pretrained: carga pesos de timm. Para pesos NO-ImageNet, pasar
             ``checkpoint_path`` y mantener ``data.image_mean/std`` alineados al
             preentrenamiento de *esos* pesos (no mezclar).
         in_channels: canales de entrada (3 = RGB).
@@ -62,6 +67,7 @@ class ConvNeXtV2FPN(nn.Module):
         drop_path_rate: stochastic depth (regularización ConvNeXt); 0.0 = off.
         checkpoint_path: pesos locales opcionales (tiene prioridad sobre ``pretrained``).
         freeze_backbone: si True, congela todos los parámetros del cuerpo.
+        freeze_stages: congela stem + stages_0..N-1 (granular).
     """
 
     def __init__(
@@ -74,6 +80,7 @@ class ConvNeXtV2FPN(nn.Module):
         drop_path_rate: float = 0.0,
         checkpoint_path: str | None = None,
         freeze_backbone: bool = False,
+        freeze_stages: int = 0,
     ) -> None:
         super().__init__()
         if variant not in _TIMM_NAMES:
@@ -95,8 +102,9 @@ class ConvNeXtV2FPN(nn.Module):
             drop_path_rate=drop_path_rate,
         )
 
-        # No hardcodeamos los channels: los leemos del propio modelo, así Tiny/Base/Large
-        # funcionan sin tocar nada (tiny → [96,192,384,768]).
+        # No hardcodeamos los channels: los leemos del propio modelo, así todas las
+        # variantes funcionan sin tocar nada (tiny → [96,192,384,768];
+        # nano → [80,160,320,640]; atto → [40,80,160,320]; etc.).
         in_channels_list = self.body.feature_info.channels()
         self.fpn = FeaturePyramidNetwork(
             in_channels_list=in_channels_list,
@@ -107,9 +115,37 @@ class ConvNeXtV2FPN(nn.Module):
         # torchvision lee esto para dimensionar RPN y heads.
         self.out_channels = out_channels
 
-        if freeze_backbone:
-            for p in self.body.parameters():
+        # Congelamiento granular. freeze_backbone = atajo para "todo" (= 4 stages).
+        # freeze_stages=N congela stem + stages_0..N-1 (de abajo hacia arriba: las
+        # features genéricas del preentrenamiento). Ahorra VRAM (menos activaciones
+        # con grad + menos estado de optimizer).
+        n_freeze = 4 if freeze_backbone else int(freeze_stages)
+        self._frozen_module_names: list[str] = []
+        self._apply_freeze(n_freeze)
+
+    def _apply_freeze(self, n_stages: int) -> None:
+        if n_stages <= 0:
+            return
+        names = ["stem_0", "stem_1"] + [f"stages_{i}" for i in range(min(n_stages, 4))]
+        for name in names:
+            mod = getattr(self.body, name, None)
+            if mod is None:
+                continue
+            for p in mod.parameters():
                 p.requires_grad_(False)
+            mod.eval()
+            self._frozen_module_names.append(name)
+
+    def train(self, mode: bool = True):
+        # Mantener las stages congeladas en eval aunque el modelo pase a train
+        # (drop_path determinista; en ConvNeXt las norms son LayerNorm, sin running stats).
+        super().train(mode)
+        if mode:
+            for name in self._frozen_module_names:
+                mod = getattr(self.body, name, None)
+                if mod is not None:
+                    mod.eval()
+        return self
 
     def forward(self, x: Tensor) -> "OrderedDict[str, Tensor]":
         feats = self.body(x)  # list[Tensor], uno por out_index
@@ -134,6 +170,42 @@ class ConvNeXtV2Base(ConvNeXtV2FPN):
 
     def __init__(self, **kwargs) -> None:
         kwargs.setdefault("variant", "base")
+        super().__init__(**kwargs)
+
+
+@BACKBONES.register("convnextv2_nano")
+class ConvNeXtV2Nano(ConvNeXtV2FPN):
+    """ConvNeXt-V2 Nano + FPN — sub-tiny con pesos a 384 (in22k_in1k_384)."""
+
+    def __init__(self, **kwargs) -> None:
+        kwargs.setdefault("variant", "nano")
+        super().__init__(**kwargs)
+
+
+@BACKBONES.register("convnextv2_pico")
+class ConvNeXtV2Pico(ConvNeXtV2FPN):
+    """ConvNeXt-V2 Pico + FPN — sub-tiny, pesos solo a 224 (fcmae_ft_in1k)."""
+
+    def __init__(self, **kwargs) -> None:
+        kwargs.setdefault("variant", "pico")
+        super().__init__(**kwargs)
+
+
+@BACKBONES.register("convnextv2_femto")
+class ConvNeXtV2Femto(ConvNeXtV2FPN):
+    """ConvNeXt-V2 Femto + FPN — sub-tiny, pesos solo a 224 (fcmae_ft_in1k)."""
+
+    def __init__(self, **kwargs) -> None:
+        kwargs.setdefault("variant", "femto")
+        super().__init__(**kwargs)
+
+
+@BACKBONES.register("convnextv2_atto")
+class ConvNeXtV2Atto(ConvNeXtV2FPN):
+    """ConvNeXt-V2 Atto + FPN — el más liviano (~3.7M params), solo 224."""
+
+    def __init__(self, **kwargs) -> None:
+        kwargs.setdefault("variant", "atto")
         super().__init__(**kwargs)
 
 
