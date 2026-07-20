@@ -37,9 +37,14 @@ from cardd.utils.registry import BACKBONES
 
 # variante → nombre de modelo timm. Extender acá para Base/Large (fase 6).
 _TIMM_NAMES = {
-    "tiny": "convnextv2_tiny",
-    "base": "convnextv2_base",
+    "tiny":  "convnextv2_tiny.fcmae_ft_in22k_in1k_384",
+    "base":  "convnextv2_base.fcmae_ft_in22k_in1k_384",
     "large": "convnextv2_large",
+    # sub-tiny:
+    "nano":  "convnextv2_nano.fcmae_ft_in22k_in1k_384",   # 384 disponible
+    "pico":  "convnextv2_pico.fcmae_ft_in1k",             # solo 224
+    "femto": "convnextv2_femto.fcmae_ft_in1k",            # solo 224
+    "atto":  "convnextv2_atto.fcmae_ft_in1k",             # solo 224
 }
 
 
