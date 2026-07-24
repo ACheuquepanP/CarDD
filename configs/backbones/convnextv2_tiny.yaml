@@ -16,12 +16,12 @@ _base_: ../base.yaml
 
 model:
   backbone:
-    name: convnextv2_base       # -> BACKBONES; 'name' lo consume el registry, el resto va al __init__
+    name: convnextv2_nano       # -> BACKBONES; 'name' lo consume el registry, el resto va al __init__
     pretrained: true            # pesos ImageNet (timm); coinciden con data.image_mean/std de base
     in_channels: 3              # RGB
-    out_channels: 256           # ancho del FPN, igual en los 5 niveles ("0".."3" + "pool")
+    out_channels: 192           # ancho del FPN, igual en los 5 niveles ("0".."3" + "pool")
     out_indices: [0, 1, 2, 3]   # 4 stages de ConvNeXt-V2 -> FPN (reducciones 4/8/16/32)
     freeze_backbone: false      # Tiny entra entero en 8 GB con AMP + grad-accum (P, §7 espec)
-    drop_path_rate: 0.2
+    drop_path_rate: 0.15
     # checkpoint_path:          # (opcional) pesos locales no-ImageNet; si se usan,
     #                           #  re-alinear data.image_mean/std al preentrenamiento de esos pesos
