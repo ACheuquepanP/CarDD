@@ -4,7 +4,7 @@ model:
   detector:
     name: cascade_mask_rcnn_composed
     loss_mods:
-      - {name: cldice, weight: 1.0, iters: 3}
+      - {name: cldice, weight: 0.8, iters: 4}
     pointrend: False              # explícito
 
 output:
