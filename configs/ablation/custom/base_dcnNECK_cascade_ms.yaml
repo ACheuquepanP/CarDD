@@ -16,17 +16,7 @@ model:
     levels: ["0", "1", "2", "3", "pool"]
     kernel_size: 3
     modulated: true   
-train:
-  epochs: 30
-  batch_size: 2               # físico (8 GB)
-  grad_accum_steps: 8         # batch efectivo = 16
-  optimizer:
-    name: adamw
-    lr: 0.0035
-    weight_decay: 0.01
-  scheduler:
-    name: cosine
-    warmup_steps: 1000  
+ 
 output:
   dir: outputs/base_dcnNECK_cascade_ms
 
