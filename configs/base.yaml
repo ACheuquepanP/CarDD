@@ -35,7 +35,7 @@ model:
 
 # --- Entrenamiento: schedule = constante de proyecto, FIJO entre filas ---
 train:
-  epochs: 30
+  epochs: 100
   batch_size: 4               # físico (8 GB)
   grad_accum_steps: 2         # batch efectivo = 16
   grad_clip: 1.0              # clip de norma del gradiente
@@ -43,7 +43,7 @@ train:
   optimizer:
     name: adamw
     lr: 0.0001
-    weight_decay: 0.01
+    weight_decay: 0.007
   scheduler:
     name: cosine
     warmup_steps: 500
