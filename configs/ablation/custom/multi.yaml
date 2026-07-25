@@ -21,7 +21,7 @@ model:
     point_loss_weight: 1.0
     point_target_resolution: 112
     pointrend_cfg:
-      in_channels: 288
+      in_channels: 256
       num_classes: 7
       train_num_points: 196
       oversample_ratio: 3.0
