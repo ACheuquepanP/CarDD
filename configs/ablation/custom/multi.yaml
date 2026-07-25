@@ -7,20 +7,11 @@
 #   - cascade    -> detector (3 stages de caja)
 _base_: ../a0_baseline.yaml
 
-data:
-  image_min_size: 1333
-  image_max_size: 1333
-  image_min_size_ratios: null
-  transforms:
-    train:
-      - {name: paper_hflip, p: 0.5}
-      - {name: paper_multiscale, h_min: 640, h_max: 1200, width: 1333}
-      
-#neck:
-  #name: dcn
-  #levels: ["0", "1", "2", "3", "pool"]
-  #kernel_size: 3
-  #modulated: true  
+neck:
+  name: dcn
+  levels: ["0", "1", "2", "3", "pool"]
+  kernel_size: 3
+  modulated: true  
 
 output:
   dir: outputs/multi_scaling
