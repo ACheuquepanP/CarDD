@@ -8,7 +8,7 @@ deterministic: false
  
 # --- Datos (Equipo D afina en Fase 1) ---
 data:
-  root: data/CarDD_COCO2
+  root: data/CarDD_COCO
   # root: data/CarDD_COCO_crop_split                   
   num_classes: 6
   split: [0.7, 0.2, 0.1]
