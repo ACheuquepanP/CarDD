@@ -12,13 +12,13 @@ data:
   # root: data/CarDD_COCO_crop_split                   
   num_classes: 6
   split: [0.7, 0.2, 0.1]
-  image_min_size: 1312
-  image_max_size: 1312
+  image_min_size: 1000
+  image_max_size: 1000
   image_min_size_ratios: null
   transforms:
     train:
       - {name: paper_hflip, p: 0.5}
-      - {name: paper_multiscale, h_min: 640, h_max: 1184, width: 1312}
+      - {name: paper_multiscale, h_min: 640, h_max: 920, width: 1000}
   image_mean: [0.485, 0.456, 0.406]   # ImageNet (ConvNeXt-V2 preentrenado), escala [0,1]
   image_std:  [0.229, 0.224, 0.225]
   num_workers: 2
@@ -57,8 +57,8 @@ model:
 # --- Entrenamiento: schedule = constante de proyecto, FIJO entre filas ---
 train:
   epochs: 100
-  batch_size: 2             # físico (8 GB)
-  grad_accum_steps: 4       # batch efectivo = 16
+  batch_size: 4             # físico (8 GB)
+  grad_accum_steps: 2       # batch efectivo = 16
   grad_clip: 1.0              # clip de norma del gradiente
   amp: true                   # precisión mixta
   optimizer:
