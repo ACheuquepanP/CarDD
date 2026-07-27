@@ -48,7 +48,7 @@ data:
 
     # --- mixup: APAGADO para aislar el efecto radial ---
     p_mixup: 0.5
-    mixup_alpha_betha: 1.5
+    mixup_alpha_beta: 1.5
 
     # --- copy-paste: APAGADO para aislar el efecto radial ---
     cp_p_early: 0.0
