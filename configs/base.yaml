@@ -51,8 +51,8 @@ data:
     mixup_alpha_beta: 1.5
 
     # --- copy-paste: APAGADO para aislar el efecto radial ---
-    cp_p_early: 0.0
-    cp_p_late: 0.0
+    cp_p_early: 0.15
+    cp_p_late: 0.5
     cp_max_paste_instances: null
     cp_min_paste_instances: 1
     cp_min_visible_ratio: 0.10
