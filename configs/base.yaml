@@ -9,40 +9,62 @@ deterministic: false
 # --- Datos (Equipo D afina en Fase 1) ---
 data:
   root: data/CarDD_COCO
-  # root: data/CarDD_COCO_crop_split                   
+  # root: data/CarDD_COCO_crop_split
   num_classes: 6
   split: [0.7, 0.2, 0.1]
   image_min_size: 1000
   image_max_size: 1000
   image_min_size_ratios: null
+  num_workers: 4
+  persistent_workers: true          # evita re-fork/época con composición pesada
   transforms:
     train:
       - {name: paper_hflip, p: 0.5}
-      - {name: paper_multiscale, h_min: 640, h_max: 920, width: 1000}
+      - {name: paper_multiscale, h_min: 640, h_max: 960, width: 1000,
+         size_divisible: 32, size_round: floor}   # múltiplo de stride (DCN); floor→1000→992
   image_mean: [0.485, 0.456, 0.406]   # ImageNet (ConvNeXt-V2 preentrenado), escala [0,1]
   image_std:  [0.229, 0.224, 0.225]
-  num_workers: 2
-  # Tiling de val/test (nuevo, D — solo lo usa scripts/evaluate_tiled.py; el
-  # camino sin tiling ignora estas claves). Defaults ya viven en tiling.py, se
-  # declaran aquí explícitos para que C los pueda tocar sin editar código.
   tiling:
-    n: 3            # matriz n x n de tiles por imagen (n impar -> tile central)
-    tile_frac: 0.5  # tamaño del tile relativo a (W,H)
-    
-  copy_paste:
-    enabled: true            # si false, se usa CarDDCocoDataset directo (sin wrapper)
-    p: 0.5
-    max_paste_instances: null      # null = todas las de la fuente
-    min_paste_instances: 1
-    min_visible_ratio: 0.10        # 0.0 = fiel al paper
-    min_paste_area: 16
-    blend: gaussian                # 'gaussian' | 'none' ('none' = fiel al paper)
-    blur_sigma: 1.5
-    blur_ksize: 5
-    random_translate: false        # false = fiel al paper
-    max_translate_frac: 0.25
+    n: 3
+    tile_frac: 0.5
+
+  composition_aug:
+    enabled: true
+
+    # --- schedule (corte seco; composición off en el último 20%) ---
+    mosaic_end_frac: 0.8
+
+    # --- modo de composición temprana ---
+    early_mode: radial            # 'mosaic' | 'radial' (aquí: solo radial)
+
+    # --- radial (prisma de cuñas) ---
+    n_sources: 4                  # nº de imágenes fuente
+    m_wedges: 4                   # nº de cuñas (4 = aspa)
+    radial_center_jitter: 0.15
+
+    # --- mosaic (ignorado con early_mode=radial, pero p_mosaic controla si compone) ---
+    p_mosaic: 1.0                 # prob. de aplicar la composición temprana (radial)
+    mosaic_center_jitter: 0.25    # sin efecto en radial
+
+    # --- mixup: APAGADO para aislar el efecto radial ---
+    p_mixup: 0.5
+    mixup_alpha_betha: 1.5
+
+    # --- copy-paste: APAGADO para aislar el efecto radial ---
+    cp_p_early: 0.0
+    cp_p_late: 0.0
+    cp_max_paste_instances: null
+    cp_min_paste_instances: 1
+    cp_min_visible_ratio: 0.10
+    cp_blend: gaussian
+    cp_blur_sigma: 1.5
+    cp_blur_ksize: 5
+    cp_random_translate: false
+
+    # --- común ---
+    min_area: 16
     avoid_self_pair: true
-    debug_sample: 0.005  
+    debug_sample: 0.005
  
 
 # --- Modelo (M afina en Fase 3; backbone-específico -> convnextv2_tiny.yaml) ---
@@ -56,7 +78,7 @@ model:
 
 # --- Entrenamiento: schedule = constante de proyecto, FIJO entre filas ---
 train:
-  epochs: 100
+  epochs: 50
   batch_size: 4             # físico (8 GB)
   grad_accum_steps: 2       # batch efectivo = 16
   grad_clip: 1.0              # clip de norma del gradiente
@@ -64,7 +86,7 @@ train:
   optimizer:
     name: adamw
     lr: 0.0001
-    weight_decay: 0.006
+    weight_decay: 0.01
   scheduler:
     name: cosine
     warmup_steps: 500
