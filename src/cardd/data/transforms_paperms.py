@@ -46,19 +46,29 @@ class PaperMultiScale:
     """Resize del paper: alto ~ U[h_min,h_max], ancho fijo. Deforma a propósito."""
 
     def __init__(self, h_min: int = 640, h_max: int = 1200, width: int = 1333,
-                 size_divisible: int = 32, debug_sample: float = 0.005) -> None:
+                 size_divisible: int = 32, size_round: str = "nearest",
+                 debug_sample: float = 0.005) -> None:
         assert 0 < h_min <= h_max
         assert size_divisible >= 1
+        assert size_round in ("nearest", "floor", "ceil"), size_round
         self.h_min, self.h_max, self.width = int(h_min), int(h_max), int(width)
         self.size_divisible = int(size_divisible)
+        self.size_round = size_round
         self.debug_sample = float(debug_sample)
 
     def _round(self, v: int) -> int:
-        """Redondea al múltiplo de `size_divisible` más cercano (mínimo un múltiplo)."""
+        """Redondea al múltiplo de `size_divisible` según `size_round`
+        ('nearest'|'floor'|'ceil'). Nunca baja de un múltiplo."""
         m = self.size_divisible
         if m <= 1:
             return int(v)
-        return max(m, int(round(v / m)) * m)
+        if self.size_round == "floor":
+            q = v // m
+        elif self.size_round == "ceil":
+            q = -(-v // m)
+        else:
+            q = int(round(v / m))
+        return max(m, q * m)
 
     def sample_h(self) -> int:
         """Sortea una altura del rango, ya redondeada al stride. Público para que
