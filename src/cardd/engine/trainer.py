@@ -1,8 +1,22 @@
-"""Entrenador (engine).
+"""Entrenador (engine) — variante Kaggle / multi-GPU (DDP).
 
 dueño: M · fase: 4 · contrato: — (consume C1, instancia el detector)
 
-Loop de entrenamiento bajo el presupuesto de 8 GB (RTX 5060):
+Igual que trainer.py pero con soporte DistributedDataParallel para Kaggle T4 x2,
+MÁS los tres ajustes de la línea de augmentación de composición:
+
+  1. `_publish_epoch`: publica la época al EpochState de composition_aug (schedule
+     mosaic/radial/mixup -> copy-paste). Corre en TODOS los ranks: cada proceso DDP
+     tiene su propio dataloader (y su propio EpochState creado en build_dataloader),
+     así que cada rank debe publicar su época a los suyos. Va en el camino común, no
+     bajo is_main.
+  2. `_save` excluye `_runtime` de cfg: ese dict contiene el EpochState (un
+     multiprocessing.Value NO pickleable) y reventaba torch.save. Es estado efímero
+     de runtime, se recrea en build_dataloader; no pertenece al checkpoint.
+  3. `build_scheduler` añade 'poly' (PolynomialLR con `power`) como alternativa al
+     cosine para entrenamientos largos: baja rápido temprano y se aplana al final.
+
+Loop de entrenamiento bajo el presupuesto de 8 GB (RTX 5060) / 2xT4 (Kaggle):
   - **AMP** (precisión mixta) activado por defecto.
   - **Acumulación de gradiente**: batch físico chico (1–2) que emula uno mayor.
   - **Schedule configurable y fijo** entre filas de ablación (higiene de P).
@@ -80,22 +94,39 @@ def build_optimizer(cfg, model: nn.Module) -> torch.optim.Optimizer:
 
 
 def build_scheduler(cfg, optimizer, total_steps: int):
+    """Scheduler de lr con warmup lineal opcional.
+
+    Opciones (train.scheduler.name):
+      - 'none'   : lr constante.
+      - 'cosine' : bajada suave (default). Pasa mucho tiempo en lr alto.
+      - 'poly'   : lr0*(1 - t/T)^power. Con power>1 baja RÁPIDO al principio y se
+                   aplana al final -> para entrenamientos largos donde la exploración
+                   útil termina antes del final (p.ej. corte de mosaic al 80%) y se
+                   quiere lr bajo para el refinamiento limpio. `train.scheduler.power`
+                   controla la agresividad (1=lineal, 2=cuadrático, más=más brusco).
+    """
     sched = get(cfg, "train.scheduler.name", "cosine")
     if not sched or str(sched).lower() == "none":
         return None  # lr constante (útil para el overfit smoke: loss→0 rápido)
+    sched = str(sched).lower()
     warmup = int(get(cfg, "train.scheduler.warmup_steps", 0))
-    if str(sched).lower() == "cosine":
-        parts, milestones = [], []
-        if warmup > 0:
-            parts.append(torch.optim.lr_scheduler.LinearLR(
-                optimizer, start_factor=1e-3, total_iters=warmup))
-            milestones.append(warmup)
-        parts.append(torch.optim.lr_scheduler.CosineAnnealingLR(
-            optimizer, T_max=max(1, total_steps - warmup)))
-        if len(parts) == 1:
-            return parts[0]
-        return torch.optim.lr_scheduler.SequentialLR(optimizer, parts, milestones=milestones)
-    raise ValueError(f"scheduler {sched!r} no soportado")
+
+    main_steps = max(1, total_steps - warmup)
+    if sched == "cosine":
+        main = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=main_steps)
+    elif sched == "poly":
+        power = float(get(cfg, "train.scheduler.power", 2.0))
+        main = torch.optim.lr_scheduler.PolynomialLR(
+            optimizer, total_iters=main_steps, power=power)
+    else:
+        raise ValueError(f"scheduler {sched!r} no soportado")
+
+    if warmup > 0:
+        warm = torch.optim.lr_scheduler.LinearLR(
+            optimizer, start_factor=1e-3, total_iters=warmup)
+        return torch.optim.lr_scheduler.SequentialLR(
+            optimizer, [warm, main], milestones=[warmup])
+    return main
 
 
 class Trainer:
@@ -206,6 +237,26 @@ class Trainer:
             ckpt_path, self.start_epoch, self.epochs, self.best_metric, self.step,
         )
 
+    def _publish_epoch(self, epoch: int) -> None:
+        """Publica la época actual al schedule de augmentación de composición.
+
+        CompositionAugDataset lee un EpochState (mp.Value compartido con sus workers)
+        para decidir la fase (mosaic/radial/mixup temprano vs. copy-paste tardío). El
+        trainer tiene el número de época y lo escribe aquí, antes de iterar.
+
+        DDP: corre en TODOS los ranks (no solo rank 0). Cada proceso tiene su propio
+        dataloader y su propio EpochState (creado en su build_dataloader), así que cada
+        uno debe publicar su época a los suyos. No hay estado compartido entre ranks
+        que sincronizar. Si la composición no está activa, es no-op.
+        """
+        rt = None
+        try:
+            rt = get(self.cfg, "_runtime.epoch_state", None)
+        except Exception:
+            rt = None
+        if rt is not None and hasattr(rt, "set"):
+            rt.set(epoch)
+
     def _to_device(self, images, targets):
         images = [img.to(self.device, non_blocking=True) for img in images]
         targets = [
@@ -242,6 +293,9 @@ class Trainer:
         )
         last = self.out_dir / "last.pth"  # default si el loop no corre (resume ya completo)
         for epoch in range(self.start_epoch, self.epochs):
+            # schedule de augmentación de composición (todos los ranks, antes de iterar)
+            self._publish_epoch(epoch)
+
             # DDP: el sampler necesita la época para barajar distinto cada vez
             sampler = getattr(self.loader, "sampler", None)
             if self.distributed and hasattr(sampler, "set_epoch"):
@@ -371,6 +425,13 @@ class Trainer:
         # DDP: solo rank 0 escribe a disco (los pesos son idénticos en todos)
         if not self.is_main:
             return path
+        # cfg puede contener `_runtime` (p.ej. el EpochState de composition_aug, que
+        # envuelve un multiprocessing.Value NO serializable). Es estado efímero de
+        # runtime, no config: se excluye del checkpoint. Se recrea en build_dataloader.
+        cfg_to_save = (
+            {k: v for k, v in self.cfg.items() if k != "_runtime"}
+            if isinstance(self.cfg, dict) else self.cfg
+        )
         torch.save(
             {
                 # _unwrap → guarda SIN el prefijo "module." de DDP/DataParallel,
@@ -381,7 +442,7 @@ class Trainer:
                 "epoch": epoch,
                 "step": self.step,
                 "best_metric": self.best_metric,
-                "cfg": self.cfg,
+                "cfg": cfg_to_save,
             },
             path,
         )
