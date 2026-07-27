@@ -39,7 +39,7 @@ data:
 
     # --- radial (prisma de cuñas) ---
     n_sources: 4                  # nº de imágenes fuente
-    m_wedges: 4                   # nº de cuñas (4 = aspa)
+    m_wedges: 6                   # nº de cuñas (4 = aspa)
     radial_center_jitter: 0.15
 
     # --- mosaic (ignorado con early_mode=radial, pero p_mosaic controla si compone) ---
