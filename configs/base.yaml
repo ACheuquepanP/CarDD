@@ -6,23 +6,21 @@
 seed: 42
 deterministic: false
  
-# --- Datos (Equipo D afina en Fase 1) ---
 data:
   root: data/CarDD_COCO
-  # root: data/CarDD_COCO_crop_split
   num_classes: 6
   split: [0.7, 0.2, 0.1]
-  image_min_size: 1000
-  image_max_size: 1000
+  image_min_size: 1312
+  image_max_size: 1312
   image_min_size_ratios: null
   num_workers: 4
-  persistent_workers: true          # evita re-fork/época con composición pesada
+  persistent_workers: true
   transforms:
     train:
       - {name: paper_hflip, p: 0.5}
-      - {name: paper_multiscale, h_min: 640, h_max: 960, width: 1000,
-         size_divisible: 32, size_round: floor}   # múltiplo de stride (DCN); floor→1000→992
-  image_mean: [0.485, 0.456, 0.406]   # ImageNet (ConvNeXt-V2 preentrenado), escala [0,1]
+      - {name: paper_multiscale, h_min: 800, h_max: 1020, width: 1312,
+         size_divisible: 32, size_round: floor}   # múltiplo de stride (DCN)
+  image_mean: [0.485, 0.456, 0.406]
   image_std:  [0.229, 0.224, 0.225]
   tiling:
     n: 3
@@ -31,26 +29,41 @@ data:
   composition_aug:
     enabled: true
 
-    # --- schedule (corte seco; composición off en el último 20%) ---
-    mosaic_end_frac: 0.8
+    source_sampling:            # sesga fuentes + guía el recorte de mosaic_crop
+      enabled: true
+      mode: max
+      weights:
+        dent: 1.3
+        scratch: 1.3
+        crack: 1.5
+
+    # --- schedule ---
+    mosaic_end_frac: 0.75       # composición off en el último 25%
 
     # --- modo de composición temprana ---
-    early_mode: radial            # 'mosaic' | 'radial' (aquí: solo radial)
+    early_mode: mosaic_crop     # 'mosaic' | 'mosaic_crop' | 'radial' | 'mixed'
 
-    # --- radial (prisma de cuñas) ---
-    n_sources: 4                  # nº de imágenes fuente
-    m_wedges: 6                   # nº de cuñas (4 = aspa)
+    # --- mosaic_crop (recorte + reescalado, estilo YOLO) ---
+    crop_frac_min: 0.6          # fracción mínima de la fuente a recortar (por eje)
+    crop_frac_max: 0.9          # frac independiente en alto y ancho
+
+    # --- radial (solo si early_mode incluye radial) ---
+    n_sources: 4
+    m_wedges: 6
     radial_center_jitter: 0.15
 
-    # --- mosaic (ignorado con early_mode=radial, pero p_mosaic controla si compone) ---
-    p_mosaic: 1.0                 # prob. de aplicar la composición temprana (radial)
-    mosaic_center_jitter: 0.25    # sin efecto en radial
+    # --- mixed (solo si early_mode: mixed) ---
+    p_radial: 0.5               # prob. de radial vs mosaic por muestra
 
-    # --- mixup: APAGADO para aislar el efecto radial ---
+    # --- composición temprana (prob. de aplicar mosaic/radial/crop) ---
+    p_mosaic: 1.0
+    mosaic_center_jitter: 0.25
+
+    # --- mixup (anidado sobre la composición temprana) ---
     p_mixup: 0.5
     mixup_alpha_beta: 1.5
 
-    # --- copy-paste: APAGADO para aislar el efecto radial ---
+    # --- copy-paste (relevo tardío) ---
     cp_p_early: 0.15
     cp_p_late: 0.5
     cp_max_paste_instances: null
@@ -65,6 +78,7 @@ data:
     min_area: 16
     avoid_self_pair: true
     debug_sample: 0.005
+
  
 
 # --- Modelo (M afina en Fase 3; backbone-específico -> convnextv2_tiny.yaml) ---
@@ -78,19 +92,22 @@ model:
 
 # --- Entrenamiento: schedule = constante de proyecto, FIJO entre filas ---
 train:
-  epochs: 50
-  batch_size: 4             # físico (8 GB)
-  grad_accum_steps: 2       # batch efectivo = 16
+  epochs: 80
+  batch_size: 1             # físico (8 GB)
+  grad_accum_steps: 16       # batch efectivo = 16
   grad_clip: 1.0              # clip de norma del gradiente
   amp: true                   # precisión mixta
   optimizer:
     name: adamw
-    lr: 0.0001
+    lr: 0.00015
     weight_decay: 0.01
   scheduler:
     name: cosine
-    warmup_steps: 500
-
+    warmup_steps: 350
+  val_schedule:
+    - {until_frac: 0.5,  every: 4}   # 1ª mitad: valida cada 3 épocas
+    - {until_frac: 0.75, every: 2}   # 3er cuarto: cada 2
+    - {until_frac: 1.0,  every: 1}   # último cuarto: cada 1
 # --- Evaluación (Equipo E, Fase 2) ---
 eval:
   metrics: [mask_AP, box_AP, AP50, AP75]
