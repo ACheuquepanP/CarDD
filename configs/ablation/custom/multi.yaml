@@ -9,16 +9,22 @@ _base_: ../a0_baseline.yaml
 
 model:
   detector:
-    name: cascade_mask_rcnn_composed
-    loss_mods:
-      - {name: cldice, weight: 1.0, iters: 3}
-    pointrend: False              # explícito
-    
+    name: cascade_mask_rcnn_focal
+    num_stages: 3
+    iou_thresholds: [0.5, 0.6, 0.7]
+    stage_loss_weights: [1.0, 0.5, 0.25]
+    focal:
+      alpha: 0.75
+      gamma: 1.5
   neck:
     name: dcn
     levels: ["0", "1"]
     kernel_size: 3
     modulated: true
+    
+# Unblock temporal: base.yaml trae estas claves vacías (→ None) y revientan en
+# data/build.py. Lo correcto es que P las cure en base (son constantes globales);
+# mientras tanto las fijo acá. Quitar cuando base.yaml tenga valor.
 
 output:
   dir: outputs/multi_scaling
