@@ -399,6 +399,7 @@ class CompositionAugDataset(Dataset):
         mosaic_end_frac: float = 0.8,
         # --- modo de composición temprana: 'mosaic' (rejilla 2x2) | 'radial' (cuñas) ---
         early_mode: str = "mosaic",
+        p_radial: float = 0.5,     # solo si early_mode='mixed': prob. de radial vs mosaic
         # --- mosaic ---
         p_mosaic: float = 1.0,
         mosaic_center_jitter: float = 0.25,
@@ -406,6 +407,9 @@ class CompositionAugDataset(Dataset):
         n_sources: int = 4,          # nº de imágenes fuente (independiente de m)
         m_wedges: int = 4,           # nº de cuñas triangulares (m=4 -> aspa)
         radial_center_jitter: float = 0.15,
+        # --- mosaic_crop (variante recorte+reescalado estilo YOLO) ---
+        crop_frac_min: float = 0.5,  # fracción mínima de la fuente a recortar (por eje)
+        crop_frac_max: float = 1.0,  # 1.0 en ambos ejes == imagen entera (como mosaic)
         # --- mixup (anidado sobre la composición temprana) ---
         p_mixup: float = 0.5,
         mixup_alpha_beta: float = 1.5,
@@ -422,6 +426,10 @@ class CompositionAugDataset(Dataset):
         # --- común ---
         min_area: int = 16,
         avoid_self_pair: bool = True,
+        # --- source sampling: sesgo estático hacia clases difíciles/raras ---
+        source_sampling: bool = False,
+        source_weights: dict | None = None,  # {nombre_clase: peso}; no listadas -> 1.0
+        source_mode: str = "max",            # combinación si la imagen tiene varias clases
         debug_sample: float = 0.005,
     ) -> None:
         self.base = base_dataset
@@ -440,12 +448,15 @@ class CompositionAugDataset(Dataset):
 
         self.mosaic_end_frac = float(mosaic_end_frac)
         self.early_mode = str(early_mode).lower()
-        assert self.early_mode in ("mosaic", "radial"), self.early_mode
+        assert self.early_mode in ("mosaic", "radial", "mixed", "mosaic_crop"), self.early_mode
+        self.p_radial = float(p_radial)  # solo 'mixed': prob. de radial (resto mosaic)
         self.p_mosaic = float(p_mosaic)
         self.mosaic_center_jitter = float(mosaic_center_jitter)
         self.n_sources = max(1, int(n_sources))
         self.m_wedges = max(3, int(m_wedges))
         self.radial_center_jitter = float(radial_center_jitter)
+        self.crop_frac_min = float(crop_frac_min)
+        self.crop_frac_max = float(crop_frac_max)
         self.p_mixup = float(p_mixup)
         self.mixup_alpha_beta = float(mixup_alpha_beta)
 
@@ -470,6 +481,22 @@ class CompositionAugDataset(Dataset):
                      "label_to_name", "cat_id_to_label", "root", "split"):
             if hasattr(base_dataset, attr):
                 setattr(self, attr, getattr(base_dataset, attr))
+
+        # --- source sampling: precomputa un peso por imagen (una sola vez) ---
+        # El peso sesga qué imágenes se eligen como FUENTES de mosaic/radial (las
+        # cuñas/celdas), NO el índice destino del dataloader (ese sigue uniforme).
+        # Peso de una imagen = combinación (max) de los pesos de las clases que
+        # contiene; clases no listadas pesan 1.0. Con source_sampling=False no se
+        # precomputa nada -> muestreo uniforme (comportamiento previo).
+        self.source_sampling = bool(source_sampling)
+        self.source_mode = str(source_mode).lower()
+        self._source_weight_by_name = {
+            str(k): float(v) for k, v in (source_weights or {}).items()
+        }
+        self._source_weights = (
+            self._precompute_source_weights(source_weights or {})
+            if self.source_sampling else None
+        )
 
     def __len__(self) -> int:
         return len(self.base)
@@ -504,13 +531,163 @@ class CompositionAugDataset(Dataset):
             j = random.randrange(n)
         return j
 
+    def _precompute_source_weights(self, weights_by_name: dict):
+        """Calcula un peso por cada imagen del dataset base, una sola vez.
+
+        Lee las clases de cada imagen vía el objeto COCO heredado. El peso de la
+        imagen es la combinación (`source_mode`) de los pesos de sus clases; las no
+        listadas valen 1.0. Devuelve una lista alineada con los índices del dataset
+        base (len == len(base)). Si no hay COCO disponible, cae a pesos uniformes.
+        """
+        n = len(self.base)
+        weights = [1.0] * n
+
+        coco = getattr(self, "coco", None)
+        cat_id_to_label = getattr(self, "cat_id_to_label", None)
+        label_to_name = getattr(self, "label_to_name", None)
+        ids = getattr(self, "ids", None)
+        if coco is None or cat_id_to_label is None or label_to_name is None or ids is None:
+            return weights  # sin metadatos -> uniforme
+
+        # nombre de clase -> peso (default 1.0)
+        wname = {str(k): float(v) for k, v in weights_by_name.items()}
+
+        def combine(vals):
+            if not vals:
+                return 1.0
+            if self.source_mode == "max":
+                return max(vals)
+            if self.source_mode == "mean":
+                return sum(vals) / len(vals)
+            if self.source_mode == "sum":
+                return sum(vals)
+            return max(vals)  # fallback
+
+        for i, img_id in enumerate(ids):
+            ann_ids = coco.getAnnIds(imgIds=img_id)
+            anns = coco.loadAnns(ann_ids)
+            names = set()
+            for a in anns:
+                label = cat_id_to_label.get(a["category_id"])
+                if label is not None:
+                    names.add(label_to_name.get(label))
+            vals = [wname.get(nm, 1.0) for nm in names if nm is not None]
+            weights[i] = combine(vals)
+        return weights
+
+    def _weighted_index(self) -> int:
+        """Índice de una imagen fuente, sesgado por _source_weights si está activo."""
+        if not self.source_sampling or self._source_weights is None:
+            return random.randrange(len(self.base))
+        return random.choices(
+            range(len(self.base)), weights=self._source_weights, k=1
+        )[0]
+
     def _sample(self, index: int, force_h: int | None):
         img, tgt = self.base[index]
         return self._apply(img, tgt, force_h)
 
+    def _label_name(self, label: int):
+        l2n = getattr(self, "label_to_name", None)
+        return l2n.get(int(label)) if l2n else None
+
+    def _crop_sample(self, img, tgt):
+        """Recorta una ventana [crop_frac_min,crop_frac_max] (frac independiente por
+        eje) de (img, tgt) y devuelve el recorte + su target recortado, SIN reescalar
+        (el reescalado a la celda lo hace mosaic_compose después).
+
+        Guiado (opción B): si source_sampling está activo y la imagen tiene alguna
+        instancia de clase con peso >1, se elige una instancia OBJETIVO al azar
+        ponderada por su peso de clase, y la ventana se posiciona para CONTENER esa
+        instancia (no centrarla): se jitterea entre todas las posiciones válidas que
+        la incluyen. Sin guiado (o sin instancia pesada), la ventana es aleatoria.
+
+        Las instancias se recortan a la ventana (intersección máscara∩ventana,
+        recalcular caja, descartar bajo min_area) — misma convención que radial.
+        """
+        _, H, W = img.shape
+        fmin, fmax = self.crop_frac_min, self.crop_frac_max
+        cw = max(1, int(round(W * random.uniform(fmin, fmax))))
+        ch = max(1, int(round(H * random.uniform(fmin, fmax))))
+        cw, ch = min(cw, W), min(ch, H)
+
+        masks = torch.as_tensor(tgt["masks"])
+        labels = torch.as_tensor(tgt["labels"])
+
+        # --- elegir posición de la ventana (x0, y0) ---
+        x0 = y0 = None
+        if (self.source_sampling and masks.numel() and masks.shape[0] > 0
+                and self._source_weight_by_name):
+            # instancias de clase pesada (peso > 1)
+            cand, cand_w = [], []
+            for k in range(masks.shape[0]):
+                nm = self._label_name(int(labels[k]))
+                w = self._source_weight_by_name.get(nm, 1.0)
+                if w > 1.0:
+                    cand.append(k)
+                    cand_w.append(w)
+            if cand:
+                k = random.choices(cand, weights=cand_w, k=1)[0]
+                m = masks[k].bool()
+                ys, xs = torch.where(m.any(1))[0], torch.where(m.any(0))[0]
+                if ys.numel() and xs.numel():
+                    iy0, iy1 = int(ys[0]), int(ys[-1])
+                    ix0, ix1 = int(xs[0]), int(xs[-1])
+                    # rango de x0 tal que la ventana [x0, x0+cw) contenga [ix0, ix1]
+                    lo_x = max(0, ix1 - cw + 1)
+                    hi_x = min(W - cw, ix0)
+                    lo_y = max(0, iy1 - ch + 1)
+                    hi_y = min(H - ch, iy0)
+                    if lo_x <= hi_x and lo_y <= hi_y:
+                        x0 = random.randint(lo_x, hi_x)
+                        y0 = random.randint(lo_y, hi_y)
+                    # si la instancia es más grande que la ventana, no cabe entera:
+                    # cae al recorte aleatorio de abajo (la contendrá parcialmente)
+
+        if x0 is None:
+            x0 = random.randint(0, W - cw)
+            y0 = random.randint(0, H - ch)
+
+        # --- recortar imagen y target ---
+        img_c = img[:, y0:y0 + ch, x0:x0 + cw].contiguous()
+        mask_dtype = masks.dtype if masks.numel() else torch.uint8
+        if masks.numel() and masks.shape[0] > 0:
+            m_c = masks[:, y0:y0 + ch, x0:x0 + cw].bool()
+            keep_masks, keep_labels, keep_iscrowd = [], [], []
+            iscrowd = torch.as_tensor(
+                tgt.get("iscrowd", torch.zeros(masks.shape[0], dtype=torch.uint8)))
+            for k in range(m_c.shape[0]):
+                if bool(m_c[k].any()):
+                    keep_masks.append(m_c[k])
+                    keep_labels.append(int(labels[k]))
+                    keep_iscrowd.append(int(iscrowd[k]) if iscrowd.numel() else 0)
+            mstack = (torch.stack(keep_masks) if keep_masks
+                      else torch.zeros((0, ch, cw), dtype=torch.bool))
+            tgt_c = _rebuild_target(mstack, keep_labels, keep_iscrowd, ch, cw,
+                                    mask_dtype, tgt, min_area=self.min_area)
+        else:
+            tgt_c = _rebuild_target(torch.zeros((0, ch, cw), dtype=torch.bool),
+                                    [], [], ch, cw, mask_dtype, tgt,
+                                    min_area=self.min_area)
+        return img_c, tgt_c
+
+    def _mosaic_crop_at(self, force_h: int | None, out_h: int, out_w: int):
+        """Mosaico donde cada celda recibe un PARCHE recortado (guiado) de la fuente,
+        reescalado a la celda — variante estilo YOLO (recorte+reescalado)."""
+        samples = []
+        for _ in range(4):
+            i = self._weighted_index()
+            img, tgt = self._sample(i, force_h)
+            samples.append(self._crop_sample(img, tgt))
+        return mosaic_compose(
+            samples, out_h=out_h, out_w=out_w,
+            center_jitter=self.mosaic_center_jitter, min_area=self.min_area,
+        )
+
+
     def _mosaic_at(self, force_h: int | None, out_h: int, out_w: int):
-        """Un mosaico de 4 muestras aleatorias, todas escaladas con force_h."""
-        idxs = [random.randrange(len(self.base)) for _ in range(4)]
+        """Un mosaico de 4 muestras (fuentes sesgadas si source_sampling)."""
+        idxs = [self._weighted_index() for _ in range(4)]
         samples = [self._sample(i, force_h) for i in idxs]
         return mosaic_compose(
             samples, out_h=out_h, out_w=out_w,
@@ -518,8 +695,8 @@ class CompositionAugDataset(Dataset):
         )
 
     def _radial_at(self, force_h: int | None, out_h: int, out_w: int):
-        """Un prisma radial de `n_sources` fuentes repartidas en `m_wedges` cuñas."""
-        idxs = [random.randrange(len(self.base)) for _ in range(self.n_sources)]
+        """Un prisma radial de `n_sources` fuentes (sesgadas si source_sampling)."""
+        idxs = [self._weighted_index() for _ in range(self.n_sources)]
         samples = [self._sample(i, force_h) for i in idxs]
         return radial_compose(
             samples, out_h=out_h, out_w=out_w, m_wedges=self.m_wedges,
@@ -527,10 +704,22 @@ class CompositionAugDataset(Dataset):
         )
 
     def _compose_early(self, force_h, out_h, out_w):
-        """Composición temprana según early_mode: mosaic (rejilla) o radial (cuñas)."""
-        if self.early_mode == "radial":
-            return self._radial_at(force_h, out_h, out_w)
-        return self._mosaic_at(force_h, out_h, out_w)
+        """Composición temprana. Devuelve (img, tgt, mode_usado).
+
+        - 'mosaic'      -> rejilla 2x2, imágenes enteras reescaladas.
+        - 'mosaic_crop' -> rejilla 2x2, PARCHE recortado (guiado a clase difícil)
+                           reescalado por celda (estilo YOLO: recorte+reescalado).
+        - 'radial'      -> prisma de cuñas.
+        - 'mixed'       -> por MUESTRA, radial con prob. p_radial, si no mosaic.
+        """
+        mode = self.early_mode
+        if mode == "mixed":
+            mode = "radial" if random.random() < self.p_radial else "mosaic"
+        if mode == "radial":
+            return (*self._radial_at(force_h, out_h, out_w), "radial")
+        if mode == "mosaic_crop":
+            return (*self._mosaic_crop_at(force_h, out_h, out_w), "mosaic_crop")
+        return (*self._mosaic_at(force_h, out_h, out_w), "mosaic")
 
     # -- fase --------------------------------------------------------------
     def _is_early(self) -> bool:
@@ -555,12 +744,13 @@ class CompositionAugDataset(Dataset):
                 probe_img, _ = self._sample(index, h)
                 out_h, out_w = int(probe_img.shape[-2]), int(probe_img.shape[-1])
 
-            img, tgt = self._compose_early(h, out_h, out_w)
-            used.append(self.early_mode)
+            img, tgt, mode_used = self._compose_early(h, out_h, out_w)
+            used.append(mode_used)
 
-            # MIXUP anidado: mezcla esta composición con OTRA del mismo modo y tamaño
+            # MIXUP anidado: mezcla esta composición con OTRA (mismo tamaño; su
+            # geometría se elige de nuevo si early_mode='mixed')
             if random.random() < self.p_mixup:
-                img2, tgt2 = self._compose_early(h, out_h, out_w)
+                img2, tgt2, mode2 = self._compose_early(h, out_h, out_w)
                 img, tgt = mixup_compose(
                     (img, tgt), (img2, tgt2),
                     alpha_beta=self.mixup_alpha_beta, min_area=self.min_area,
