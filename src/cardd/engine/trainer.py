@@ -177,6 +177,12 @@ class Trainer:
         self.amp = bool(get(cfg, "train.amp", True)) and self.device.type == "cuda"
         self.log_interval = int(get(cfg, "train.log_interval", 10))
         self.val_interval = max(1, int(get(cfg, "train.val_interval", 1)))
+        # val_schedule OPCIONAL (idéntico a trainer.py): valida con distinta frecuencia
+        # por tramo (fracción de épocas). Solo afecta val+best; last.pth sigue cada
+        # época. La decisión depende solo de epoch+config -> igual en todos los ranks
+        # (crítico en DDP: el barrier exige que todos decidan lo mismo).
+        self.val_schedule = self._parse_val_schedule(
+            get(cfg, "train.val_schedule", None))
         self.grad_clip = get(cfg, "train.grad_clip", None)
         self.ckpt_interval = int(get(cfg, "train.ckpt_interval", 0))  # 0 = solo last.pth al final
         self.out_dir = Path(get(cfg, "output.dir", "outputs/run"))
@@ -236,6 +242,42 @@ class Trainer:
             "resume desde %s · sigue en epoch %d/%d · best_metric=%.4f · step=%d",
             ckpt_path, self.start_epoch, self.epochs, self.best_metric, self.step,
         )
+
+    def _parse_val_schedule(self, spec):
+        """Normaliza train.val_schedule a lista ordenada de (until_frac, every).
+        None si no hay spec (se usa val_interval fijo). El último tramo se fuerza a
+        cubrir hasta 1.0."""
+        if not spec:
+            return None
+        tramos = []
+        for item in spec:
+            uf = float(item.get("until_frac", 1.0))
+            ev = max(1, int(item.get("every", 1)))
+            tramos.append((uf, ev))
+        tramos.sort(key=lambda t: t[0])
+        if tramos and tramos[-1][0] < 1.0:
+            tramos.append((1.0, tramos[-1][1]))
+        return tramos
+
+    def _val_every_for(self, epoch: int) -> int:
+        if not self.val_schedule:
+            return self.val_interval
+        frac = (epoch + 1) / max(1, self.epochs)
+        for until_frac, every in self.val_schedule:
+            if frac <= until_frac:
+                return every
+        return self.val_schedule[-1][1]
+
+    def _is_val_epoch(self, epoch: int) -> bool:
+        """True si ESTA época es de validación, según schedule (o interval fijo).
+
+        DDP-safe: depende SOLO de epoch+config, así que todos los ranks devuelven lo
+        mismo -> el dist.barrier() posterior no puede deadlockear. La última época
+        siempre valida. NO chequea val_loader aquí (eso difiere entre ranks; el rank
+        que no lo tenga simplemente no valida pero sí entra al barrier)."""
+        if (epoch + 1) == self.epochs:
+            return True
+        return (epoch + 1) % self._val_every_for(epoch) == 0
 
     def _publish_epoch(self, epoch: int) -> None:
         """Publica la época actual al schedule de augmentación de composición.
@@ -306,8 +348,10 @@ class Trainer:
             # validación SIN gradiente + selección de best.pth por mask_AP de val
             # DDP: SOLO rank 0 valida (val_loader es None en los demás); los otros
             # ranks esperan en el barrier a que rank 0 termine.
+            # validación: frecuencia por val_schedule (o interval fijo). La decisión
+            # es idéntica en todos los ranks (solo epoch+config) -> barrier seguro.
             stop_now = False
-            if (epoch + 1) % self.val_interval == 0:
+            if self._is_val_epoch(epoch):
                 if self.val_loader is not None:
                     val_ap = self._validate(epoch)
                     improved = val_ap > self.best_metric + self.es_min_delta
