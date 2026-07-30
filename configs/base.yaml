@@ -94,7 +94,7 @@ model:
 train:
   epochs: 80
   batch_size: 1             # físico (8 GB)
-  grad_accum_steps: 16       # batch efectivo = 16
+  grad_accum_steps: 8       # batch efectivo = 16
   grad_clip: 1.0              # clip de norma del gradiente
   amp: true                   # precisión mixta
   optimizer:
