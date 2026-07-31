@@ -18,7 +18,7 @@ data:
   transforms:
     train:
       - {name: paper_hflip, p: 0.5}
-      - {name: paper_multiscale, h_min: 800, h_max: 1020, width: 1312,
+      - {name: paper_multiscale, h_min: 640, h_max: 1184, width: 1312,
          size_divisible: 32, size_round: floor}   # múltiplo de stride (DCN)
   image_mean: [0.485, 0.456, 0.406]
   image_std:  [0.229, 0.224, 0.225]
@@ -41,7 +41,7 @@ data:
     mosaic_end_frac: 0.75       # composición off en el último 25%
 
     # --- modo de composición temprana ---
-    early_mode: mosaic_crop     # 'mosaic' | 'mosaic_crop' | 'radial' | 'mixed'
+    early_mode: mixed     # 'mosaic' | 'mosaic_crop' | 'radial' | 'mixed'
 
     # --- mosaic_crop (recorte + reescalado, estilo YOLO) ---
     crop_frac_min: 0.6          # fracción mínima de la fuente a recortar (por eje)
