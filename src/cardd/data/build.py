@@ -104,6 +104,36 @@ def build_dataset(cfg, split: str):
     root = Path(_cfg_get(cfg, "data.root"))
     ca_enabled = bool(_cfg_get(cfg, "data.composition_aug.enabled", False))
 
+    # formato NUEVO (programable): si el bloque composition_aug trae una lista `augs`,
+    # se usa el orquestador modular CompositionAug (augs/*.py). Si no, el legacy
+    # CompositionAugDataset (retrocompatible con configs viejas de early_mode/p_*).
+    ca_spec = _cfg_get(cfg, "data.composition_aug", {}) or {}
+    ca_new_format = isinstance(ca_spec.get("augs"), list)
+
+    if split == "train" and ca_enabled and ca_new_format:
+        from cardd.data.composition import CompositionAug, EpochState
+
+        base = CarDDCocoDataset(root=root, split=split, transforms=None)
+        scale_obj, per_sample = _split_train_transform_specs(cfg)
+
+        epoch_state = EpochState(0)
+        if isinstance(cfg, dict):
+            cfg.setdefault("_runtime", {})["epoch_state"] = epoch_state
+
+        ds = CompositionAug(
+            base, scale_transform=scale_obj, per_sample_transforms=per_sample,
+            spec=ca_spec, total_epochs=int(_cfg_get(cfg, "train.epochs", 1)),
+            epoch_state=epoch_state,
+        )
+        log.info(
+            "dataset 'train' (composition_aug PROGRAMABLE): %d imagenes, %d clases · "
+            "%d augs, mixup=%s, class_weights=%s",
+            len(ds), ds.num_classes, len(ca_spec.get("augs", [])),
+            bool((ca_spec.get("mixup", {}) or {}).get("enabled", False)),
+            bool((ca_spec.get("class_weights", {}) or {}).get("enabled", False)),
+        )
+        return ds
+
     if split == "train" and ca_enabled:
         from cardd.data.composition_aug import CompositionAugDataset, EpochState
 
