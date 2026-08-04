@@ -93,26 +93,104 @@ def build_optimizer(cfg, model: nn.Module) -> torch.optim.Optimizer:
     raise ValueError(f"optimizer {name!r} no soportado")
 
 
+class _RestartLR(torch.optim.lr_scheduler.LRScheduler):
+    """Scheduler con INTERRUPCIONES (restarts) programadas.
+
+    En cada punto de `restarts` la curva en curso se INTERRUMPE y arranca una nueva
+    desde un lr maximo reducido. Cada curva se calcula desde su punto de inicio HASTA
+    EL FINAL del entrenamiento (no comprimida en su tramo), asi que se corta a mitad
+    de su recorrido cuando llega el siguiente restart -> caida abrupta en cada punto.
+
+    Ejemplo (100 epocas, lr=2e-4, restarts=[0.4,0.7], lr_mult=0.1):
+        tramo 0: cosine 2e-4  con T=100 ep, se corta en la 40 (iba por ~1.6e-4)
+        tramo 1: cosine 2e-5  con T=60 ep,  se corta en la 70 (iba por ~1.0e-5)
+        tramo 2: cosine 2e-6  con T=30 ep,  completa hasta 0
+
+    Args:
+        optimizer: el optimizer.
+        total_steps: pasos totales del entrenamiento (post-warmup).
+        restarts: fracciones [0,1] donde interrumpir (p.ej. [0.4, 0.7]).
+        lr_mult: factor del maximo en cada interrupcion sucesiva (0.1 = cada una
+            arranca a la decima parte del maximo anterior).
+        curve: 'cosine' | 'poly' - forma de cada curva.
+        power: exponente si curve='poly'.
+    """
+
+    def __init__(self, optimizer, total_steps: int, restarts, lr_mult: float = 0.1,
+                 curve: str = "cosine", power: float = 2.0, last_epoch: int = -1):
+        self.total_steps = max(1, int(total_steps))
+        pts = sorted({int(round(float(r) * self.total_steps)) for r in (restarts or [])})
+        self.starts = [0] + [p for p in pts if 0 < p < self.total_steps]
+        self.lr_mult = float(lr_mult)
+        self.curve = str(curve).lower()
+        self.power = float(power)
+        super().__init__(optimizer, last_epoch)
+
+    def _segment(self, step: int) -> int:
+        """Indice del tramo activo (el ultimo cuyo inicio ya paso)."""
+        seg = 0
+        for i, s in enumerate(self.starts):
+            if step >= s:
+                seg = i
+        return seg
+
+    def get_lr(self):
+        step = max(0, self.last_epoch)
+        seg = self._segment(step)
+        s0 = self.starts[seg]
+        # cada curva se extiende desde su inicio HASTA EL FINAL del entrenamiento
+        span = max(1, self.total_steps - s0)
+        t = min(1.0, (step - s0) / span)
+        peak_scale = self.lr_mult ** seg
+        if self.curve == "poly":
+            shape = (1.0 - t) ** self.power
+        else:
+            shape = 0.5 * (1.0 + math.cos(math.pi * t))
+        return [base * peak_scale * shape for base in self.base_lrs]
+
+
 def build_scheduler(cfg, optimizer, total_steps: int):
-    """Scheduler de lr con warmup lineal opcional.
+    """Construye el scheduler de lr con warmup lineal opcional.
 
     Opciones (train.scheduler.name):
       - 'none'   : lr constante.
-      - 'cosine' : bajada suave (default). Pasa mucho tiempo en lr alto.
-      - 'poly'   : lr0*(1 - t/T)^power. Con power>1 baja RÁPIDO al principio y se
-                   aplana al final -> para entrenamientos largos donde la exploración
-                   útil termina antes del final (p.ej. corte de mosaic al 80%) y se
-                   quiere lr bajo para el refinamiento limpio. `train.scheduler.power`
-                   controla la agresividad (1=lineal, 2=cuadrático, más=más brusco).
+      - 'cosine' : bajada suave (default). Pasa mucho tiempo en lr alto; ideal cuando
+                   el entrenamiento largo se usa para explorar todo el recorrido.
+      - 'poly'   : bajada polinómica lr0*(1 - t/T)^power. Con power>1 cae RÁPIDO al
+                   principio y se aplana al final -> alternativa para entrenamientos
+                   largos donde la exploración útil termina antes del final y se quiere
+                   lr bajo para el refinamiento limpio final. `train.scheduler.power`
+                   controla la agresividad (1=lineal, 2=cuadrático). Estándar en
+                   segmentación (DeepLab).
+
+    REINICIOS (opcional, para cualquiera de las curvas): si `train.scheduler.restarts`
+    es una lista de fracciones, el lr se REINICIA en esos puntos (warm restarts): vuelve
+    a un máximo y decae de nuevo con la curva. Equivale a interrumpir y relanzar el
+    entrenamiento con lr fresco, pero programado y reproducible.
+      restarts: [0.4, 0.7]   -> reinicia al 40% y al 70% del training
+      lr_mult:  0.5          -> cada reinicio arranca a la mitad del máximo anterior
+                                (1.0 = todos los tramos al lr original)
+    Con `restarts: null` (o ausente, o lista vacía) el comportamiento es el de siempre
+    (una sola curva monótona, sin reinicios).
+
+    En todos los casos, `warmup_steps>0` antepone un LinearLR y encadena con
+    SequentialLR, igual para cosine, poly y reinicios.
     """
     sched = get(cfg, "train.scheduler.name", "cosine")
     if not sched or str(sched).lower() == "none":
         return None  # lr constante (útil para el overfit smoke: loss→0 rápido)
     sched = str(sched).lower()
     warmup = int(get(cfg, "train.scheduler.warmup_steps", 0))
+    restarts = get(cfg, "train.scheduler.restarts", None)
 
     main_steps = max(1, total_steps - warmup)
-    if sched == "cosine":
+
+    if restarts:  # null / false / [] -> desactivado
+        main = _RestartLR(
+            optimizer, total_steps=main_steps, restarts=restarts,
+            lr_mult=float(get(cfg, "train.scheduler.lr_mult", 0.1)),
+            curve=sched, power=float(get(cfg, "train.scheduler.power", 2.0)))
+    elif sched == "cosine":
         main = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=main_steps)
     elif sched == "poly":
         power = float(get(cfg, "train.scheduler.power", 2.0))
