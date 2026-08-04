@@ -3,23 +3,23 @@
 # Las CONSTANTES de proyecto (schedule, mean/std) viven aquí; curarlas es
 # custodia de P, no un override por fila.
 
-seed: 42
+seed: 32
 deterministic: false
  
 data:
   root: data/CarDD_COCO
   num_classes: 6
   split: [0.7, 0.2, 0.1]
-  image_min_size: 1312
-  image_max_size: 1312
+  image_min_size: 1000
+  image_max_size: 1000
   image_min_size_ratios: null
   num_workers: 4
   persistent_workers: true
   transforms:
     train:
       - {name: paper_hflip, p: 0.5}
-      - {name: paper_multiscale, h_min: 640, h_max: 1184, width: 1312,
-         size_divisible: 32, size_round: floor}   # múltiplo de stride (DCN)
+      - {name: paper_multiscale, h_min: 480, h_max: 960, width: 1000,
+         size_divisible: 2, size_round: floor}   # múltiplo de stride (DCN)
   image_mean: [0.485, 0.456, 0.406]
   image_std:  [0.229, 0.224, 0.225]
   tiling:
@@ -29,57 +29,61 @@ data:
   composition_aug:
     enabled: true
 
-    source_sampling:            # sesga fuentes + guía el recorte de mosaic_crop
+    # ── peso de imagen normal (referencia; los weights de augs son relativos) ──
+    normal_weight: 1.0
+
+    # ── pesos por clase: sesgan selección de fuente + guían recorte de mosaic_crop ──
+    class_weights:
       enabled: true
-      mode: max
-      weights:
-        dent: 1.3
-        scratch: 1.3
-        crack: 1.5
+      mode: max                    # combina si la imagen tiene varias clases: max|mean|sum
+      weights: {dent: 2, scratch: 2, crack: 3}
+      decay:
+        curve: cosine              # linear|cosine|log|none
+        end_factor: 0.3            # crack 1.5 → 1.3 hacia el final
+        window: [0.0, 0.9]
 
-    # --- schedule ---
-    mosaic_end_frac: 0.75       # composición off en el último 25%
+    # ── augs de composición (lista de instancias; puedes repetir un type) ──
+    augs:
+      - type: radial
+        window: [0, 0.4]
+        weight: 25
+        decay:   {curve: cosine, end: 20}
+        enhance: {curve: linear, param: m_wedges, end: 6}
+        params:  {n_sources: 4, m_wedges: 8, center_jitter: 0.25, center_shape: circle}
 
-    # --- modo de composición temprana ---
-    early_mode: mixed     # 'mosaic' | 'mosaic_crop' | 'radial' | 'mixed'
+      - type: mosaic
+        window: [0.3, 0.8]
+        weight: 10
+        decay:   {curve: linear, end: 6}
+        enhance: {curve: linear, param: grid, end: 2}
+        params:  {grid: 2, center_jitter: 0.2, center_shape: square}
 
-    # --- mosaic_crop (recorte + reescalado, estilo YOLO) ---
-    crop_frac_min: 0.6          # fracción mínima de la fuente a recortar (por eje)
-    crop_frac_max: 0.9          # frac independiente en alto y ancho
+      - type: mosaic_crop
+        window: [0.4, 0.70]
+        weight: 10
+        params:  {grid: 2, crop_frac_min: 0.6, crop_frac_max: 1.0,
+                  center_jitter: 0.25, center_shape: square}
 
-    # --- radial (solo si early_mode incluye radial) ---
-    n_sources: 4
-    m_wedges: 6
-    radial_center_jitter: 0.15
+      - type: copy_paste
+        window: [0.1, 0.95]
+        weight: 10
+        enhance: {curve: linear, param: max_paste_instances, start: 4, end: 3}
+        params:  {max_paste_instances: 6, min_paste_instances: 3,
+                  min_visible_ratio: 0.10, blend: gaussian,
+                  blur_sigma: 1.5, blur_ksize: 5, random_translate: false}
 
-    # --- mixed (solo si early_mode: mixed) ---
-    p_radial: 0.5               # prob. de radial vs mosaic por muestra
+    # ── mixup (operador aparte: ventana + probabilidad + params) ──
+    mixup:
+      enabled: true
+      window: [0, 0.85]
+      p: 0.8
+      decay:  {curve: linear, param: p, end: 0.5}
+      params: {alpha_beta: 1.5, n_images: 2}
 
-    # --- composición temprana (prob. de aplicar mosaic/radial/crop) ---
-    p_mosaic: 1.0
-    mosaic_center_jitter: 0.25
-
-    # --- mixup (anidado sobre la composición temprana) ---
-    p_mixup: 0.5
-    mixup_alpha_beta: 1.5
-
-    # --- copy-paste (relevo tardío) ---
-    cp_p_early: 0.15
-    cp_p_late: 0.5
-    cp_max_paste_instances: null
-    cp_min_paste_instances: 1
-    cp_min_visible_ratio: 0.10
-    cp_blend: gaussian
-    cp_blur_sigma: 1.5
-    cp_blur_ksize: 5
-    cp_random_translate: false
-
-    # --- común ---
+    # ── común ──
     min_area: 16
     avoid_self_pair: true
     debug_sample: 0.005
-
- 
 
 # --- Modelo (M afina en Fase 3; backbone-específico -> convnextv2_tiny.yaml) ---
 model:
@@ -104,9 +108,13 @@ train:
   scheduler:
     name: cosine
     warmup_steps: 350
+    restarts: [0.45, 0.75]  # reinicia al 45% y 75% del training
+    lr_mult: 0.25          # cada reinicio arranca a la mitad del pico anterior
+
+
   val_schedule:
-    - {until_frac: 0.5,  every: 4}   # 1ª mitad: valida cada 3 épocas
-    - {until_frac: 0.75, every: 2}   # 3er cuarto: cada 2
+    - {until_frac: 0.5,  every: 6}   # 1ª mitad: valida cada 3 épocas
+    - {until_frac: 0.75, every: 3}   # 3er cuarto: cada 2
     - {until_frac: 1.0,  every: 1}   # último cuarto: cada 1
 # --- Evaluación (Equipo E, Fase 2) ---
 eval:
