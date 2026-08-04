@@ -36,11 +36,11 @@ data:
     class_weights:
       enabled: true
       mode: max                    # combina si la imagen tiene varias clases: max|mean|sum
-      weights: {dent: 2, scratch: 2, crack: 3}
+      weights: {dent: 2.5, scratch: 2.5, crack: 3.5}
       decay:
         curve: cosine              # linear|cosine|log|none
         end_factor: 0.3            # crack 1.5 → 1.3 hacia el final
-        window: [0.0, 0.9]
+        window: [0.0, 0.95]
 
     # ── augs de composición (lista de instancias; puedes repetir un type) ──
     augs:
