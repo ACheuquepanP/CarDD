@@ -27,7 +27,7 @@ data:
     tile_frac: 0.5
 
   composition_aug:
-    enabled: true
+    enabled: false
 
     # ── peso de imagen normal (referencia; los weights de augs son relativos) ──
     normal_weight: 1.0
@@ -103,12 +103,12 @@ train:
   amp: true                   # precisión mixta
   optimizer:
     name: adamw
-    lr: 0.00015
+    lr: 0.0002
     weight_decay: 0.01
   scheduler:
     name: cosine
     warmup_steps: 350
-    restarts: [0.45, 0.75]  # reinicia al 45% y 75% del training
+    restarts: [0.40, 0.75]  # reinicia al 45% y 75% del training
     lr_mult: 0.25          # cada reinicio arranca a la mitad del pico anterior
 
 
