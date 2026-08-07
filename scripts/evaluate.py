@@ -104,18 +104,44 @@ def collect_coco_results(cfg, split: str, weights: str, logger):
 
 
 def _format_c5(c5: dict) -> str:
-    """Resumen legible de una linea por metrica para stdout."""
-    head = (
-        f"mask_AP={c5['mask_AP']:.4f}  box_AP={c5['box_AP']:.4f}  "
-        f"AP50={c5['AP50']:.4f}  AP75={c5['AP75']:.4f}"
+    """Resumen legible para stdout: agregados, por escala y por clase,
+    en mask y box, a AP@[.50:.95] / AP50 / AP75."""
+    f = lambda v: f"{v:.4f}" if isinstance(v, (int, float)) else "  --  "
+
+    lines: list[str] = []
+    lines.append(
+        f"mask_AP={f(c5['mask_AP'])}  box_AP={f(c5['box_AP'])}  "
+        f"AP50={f(c5['AP50'])}  AP75={f(c5['AP75'])}"
     )
+    lines.append(
+        "  agregado:"
+        f"  mask 50:95={f(c5['mask_AP'])}  50={f(c5['AP50'])}  75={f(c5['AP75'])}"
+        f"  |  box 50:95={f(c5['box_AP'])}"
+        f"  50={f(c5.get('box_AP50'))}  75={f(c5.get('box_AP75'))}"
+    )
+
     sc = c5["per_scale"]
-    scale = f"APS={sc['APS']:.4f}  APM={sc['APM']:.4f}  APL={sc['APL']:.4f}"
-    per_cls = "\n".join(
-        f"    {name:<16} mask_AP={v['mask_AP']:.4f}  box_AP={v['box_AP']:.4f}"
-        for name, v in c5["per_class"].items()
-    )
-    return f"{head}\n  {scale}\n  per_class:\n{per_cls}"
+    lines.append(f"  APS={f(sc['APS'])}  APM={f(sc['APM'])}  APL={f(sc['APL'])}")
+    lines.append("  per_scale (50:95 / 50 / 75):")
+    for kind in ("mask", "box"):
+        block = sc.get(kind)
+        if not block:
+            continue
+        for band in ("small", "medium", "large"):
+            b = block[band]
+            lines.append(
+                f"    {kind:<5} {band:<7} "
+                f"AP={f(b['AP'])}  AP50={f(b['AP50'])}  AP75={f(b['AP75'])}"
+            )
+
+    lines.append("  per_class (50:95 / 50 / 75):")
+    for name, v in c5["per_class"].items():
+        lines.append(
+            f"    {name:<16} "
+            f"mask={f(v['mask_AP'])}/{f(v.get('mask_AP50'))}/{f(v.get('mask_AP75'))}  "
+            f"box={f(v['box_AP'])}/{f(v.get('box_AP50'))}/{f(v.get('box_AP75'))}"
+        )
+    return "\n".join(lines)
 
 
 def main() -> None:
