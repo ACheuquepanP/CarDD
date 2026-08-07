@@ -41,7 +41,24 @@ from cardd.evaluation.per_class_metrics import extract_per_class
 from cardd.evaluation.per_scale_metrics import extract_per_scale
 
 # Llaves del contrato C5 (se valida que evaluate() las emita todas).
-C5_KEYS = ("mask_AP", "box_AP", "AP50", "AP75", "mask_boundary_AP", "per_class", "per_scale")
+C5_KEYS = (
+    "mask_AP", "box_AP", "AP50", "AP75", "box_AP50", "box_AP75",
+    "mask_boundary_AP", "per_class", "per_scale",
+)
+
+# Bandas de área del PROYECTO (reemplazan las estándar de COCO 32²/96²):
+#   small:  area < 128²
+#   medium: 128² <= area < 256²
+#   large:  area >= 256²
+# Nota pycocotools: el filtro interno es aRng[0] < area <= aRng[1], por eso
+# el tope de 'medium' es 256²-1 (así 256² exacto ya cuenta como large).
+AREA_RNG = [
+    [0**2, 1e5**2],           # all
+    [0**2, 128**2],           # small
+    [128**2, 256**2 - 1],     # medium
+    [256**2 - 1, 1e5**2],     # large
+]
+AREA_RNG_LBL = ["all", "small", "medium", "large"]
 
 
 def _to_numpy(x: Any) -> np.ndarray:
@@ -106,6 +123,9 @@ def _run_one(
 ) -> COCOeval:
     """Una pasada de COCOeval (evaluate+accumulate+summarize) para un iouType.
 
+    Usa las bandas de área del proyecto (AREA_RNG: 128²/256²), no las estándar
+    de COCO, así APS/APM/APL en per_scale reflejan los cortes propios.
+
     img_ids = imágenes realmente INFERIDAS (no solo las que tienen detección):
     COCOeval evalúa por defecto sobre TODO el GT, así que sin recortar, las
     imágenes con GT pero sin inferencia hunden el AP (bug AP≈0 en subconjuntos).
@@ -114,6 +134,8 @@ def _run_one(
     coco_dt = coco_gt.loadRes(coco_results)
     ev = COCOeval(coco_gt, coco_dt, iouType=iou_type)
     ev.params.imgIds = img_ids
+    ev.params.areaRng = AREA_RNG
+    ev.params.areaRngLbl = AREA_RNG_LBL
     ev.evaluate()
     ev.accumulate()
     ev.summarize()
@@ -122,17 +144,26 @@ def _run_one(
 
 def _empty_c5(cat_id_to_name: Mapping[int, str]) -> dict:
     """C5 con ceros: el modelo no predijo nada (tipico al inicio del train)."""
+    zero_cls = {
+        "mask_AP": 0.0, "mask_AP50": 0.0, "mask_AP75": 0.0,
+        "box_AP": 0.0, "box_AP50": 0.0, "box_AP75": 0.0,
+        "boundary_AP": 0.0,
+    }
+    zero_band = {"AP": 0.0, "AP50": 0.0, "AP75": 0.0}
     return {
         "mask_AP": 0.0,
         "box_AP": 0.0,
         "AP50": 0.0,
         "AP75": 0.0,
+        "box_AP50": 0.0,
+        "box_AP75": 0.0,
         "mask_boundary_AP": 0.0,
-        "per_class": {
-            name: {"mask_AP": 0.0, "box_AP": 0.0, "boundary_AP": 0.0}
-            for name in cat_id_to_name.values()
+        "per_class": {name: dict(zero_cls) for name in cat_id_to_name.values()},
+        "per_scale": {
+            "APS": 0.0, "APM": 0.0, "APL": 0.0,
+            "mask": {s: dict(zero_band) for s in ("small", "medium", "large")},
+            "box": {s: dict(zero_band) for s in ("small", "medium", "large")},
         },
-        "per_scale": {"APS": 0.0, "APM": 0.0, "APL": 0.0},
     }
 
 
@@ -173,9 +204,11 @@ def evaluate(
         "box_AP": float(ev_bbox.stats[0]),
         "AP50": float(ev_segm.stats[1]),   # segm
         "AP75": float(ev_segm.stats[2]),   # segm
+        "box_AP50": float(ev_bbox.stats[1]),
+        "box_AP75": float(ev_bbox.stats[2]),
         "mask_boundary_AP": float(ev_bnd.stats[0]) if ev_bnd is not None else float("nan"),
         "per_class": extract_per_class(ev_segm, ev_bbox, cat_id_to_name, ev_bnd),
-        "per_scale": extract_per_scale(ev_segm),  # escalas sobre mascara
+        "per_scale": extract_per_scale(ev_segm, ev_bbox),  # mask+box por banda propia
     }
     assert set(C5_KEYS) <= out.keys(), "C5 incompleto"
     return out
