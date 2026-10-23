@@ -27,7 +27,7 @@ data:
     tile_frac: 0.5
 
   composition_aug:
-    enabled: true
+    enabled: false
 
     # ── peso de imagen normal (referencia; los weights de augs son relativos) ──
     normal_weight: 1.0
