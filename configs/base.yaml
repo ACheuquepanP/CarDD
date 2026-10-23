@@ -27,14 +27,14 @@ data:
     tile_frac: 0.5
 
   composition_aug:
-    enabled: false
+    enabled: true
 
     # ── peso de imagen normal (referencia; los weights de augs son relativos) ──
     normal_weight: 1.0
 
     # ── pesos por clase: sesgan selección de fuente + guían recorte de mosaic_crop ──
     class_weights:
-      enabled: false
+      enabled: true
       mode: max                    # combina si la imagen tiene varias clases: max|mean|sum
       weights: {dent: 2.5, scratch: 2.5, crack: 3.5}
       decay:
