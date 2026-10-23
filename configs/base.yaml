@@ -113,8 +113,8 @@ train:
 
 
   val_schedule:
-    - {until_frac: 0.5,  every: 6}   # 1ª mitad: valida cada 3 épocas
-    - {until_frac: 0.75, every: 3}   # 3er cuarto: cada 2
+    - {until_frac: 0.5,  every: 1}   # 1ª mitad: valida cada 3 épocas
+    - {until_frac: 0.75, every: 1}   # 3er cuarto: cada 2
     - {until_frac: 1.0,  every: 1}   # último cuarto: cada 1
 # --- Evaluación (Equipo E, Fase 2) ---
 eval:
