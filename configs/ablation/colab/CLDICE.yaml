@@ -1,3 +1,0 @@
-_base_: ../custom/cldice.yaml
-output:
-  dir: /kaggle/working/cardd_ckpts/abl_cldice
