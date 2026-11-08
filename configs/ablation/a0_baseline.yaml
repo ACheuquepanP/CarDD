@@ -1,12 +1,6 @@
 # configs/ablation/a0_baseline.yaml
-# dueño: M · fase: 4 · contrato: C4 (entrada C1 · salida C2)
-#
-# Línea base: Mask R-CNN + ConvNeXt-V2 Tiny, sin módulos de ablación.
-#
-# FUENTE ÚNICA DEL SCHEDULE: vive en base.yaml (bloques `train` y `optim`),
-# como constante entre filas, bajo custodia de P (misma lógica que `image_mean/std`).
-# a0 NO redeclara el schedule: solo fija dónde escribir las salidas. Las filas
-# a1–a4 heredan de a0 y cambian UNA sola cosa → el schedule queda fijo para todas.
+# Baseline: Mask R-CNN + ConvNeXt-V2 Tiny, no ablation modules.
+# Schedule comes from base.yaml and is not redeclared here.
 
 _base_: ../backbones/convnextv2_tiny.yaml
 
@@ -15,19 +9,25 @@ model:
   detector:
     name: cascade_mask_rcnn
     num_stages: 3
-    iou_thresholds:     [0.5, 0.6, 0.7]     # umbral de positivos por stage
-    stage_loss_weights: [1.0, 0.5, 0.25]    # peso al plegar en loss_classifier/box_reg
-    bbox_reg_weights:                        # precisión creciente del BoxCoder por stage
+    iou_thresholds:     [0.5, 0.6, 0.7]
+    stage_loss_weights: [1.0, 0.5, 0.25]
+    bbox_reg_weights:
       - [10.0, 10.0,  5.0,  5.0]
       - [20.0, 20.0, 10.0, 10.0]
       - [30.0, 30.0, 15.0, 15.0]
-      
+
 output:
   dir: outputs/a0_baseline
 
-# Unblock temporal: base.yaml trae estas claves vacías (→ None) y revientan en
-# data/build.py. Lo correcto es que P las cure en base (son constantes globales);
-# mientras tanto las fijo acá. Quitar cuando base.yaml tenga valor.
 data:
   batch_size: 1
   num_workers: 4
+
+  # NSA switch. false -> only paper_hflip + paper_multiscale from base.yaml.
+  # true -> inherits the full composition block from base (radial, mosaic,
+  # mosaic_crop, copy_paste, mixup, class weights); then drop the two lines below.
+  composition_aug:
+    enabled: false
+    augs: []
+    mixup:
+      enabled: false
