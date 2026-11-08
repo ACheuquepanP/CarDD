@@ -28,6 +28,3 @@ data:
   # mosaic_crop, copy_paste, mixup, class weights); then drop the two lines below.
   composition_aug:
     enabled: false
-    augs: []
-    mixup:
-      enabled: false
