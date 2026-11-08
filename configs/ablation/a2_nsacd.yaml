@@ -1,0 +1,34 @@
+# CarDD · NSA only, no class weighting.
+# Inherits everything from a0_baseline; turns NSA on and makes source
+# selection uniform. To change the augmentations themselves, edit base.yaml.
+
+_base_: a0_baseline.yaml
+
+model:
+  detector:
+    name: cascade_mask_rcnn_focal
+    num_stages: 3
+    iou_thresholds: [0.5, 0.6, 0.7]
+    stage_loss_weights: [1.0, 0.5, 0.25]
+    focal:
+      alpha: 0.75
+      gamma: 1.5
+  neck:
+    name: dcn
+    levels: ["0", "1"]
+    kernel_size: 3
+    modulated: true
+
+data:
+  composition_aug:
+    enabled: true
+    # Uniform source selection: every image is equally likely to be a source
+    # and mosaic_crop is not guided towards any class. The explicit 1.0s keep
+    # it uniform even if `enabled` is ignored (an empty dict would not: a
+    # recursive merge would leave base.yaml's values in place).
+    class_weights:
+      enabled: true
+      weights: {dent: 3.0, scratch: 2.0, crack: 2.0}
+
+output:
+  dir: outputs/nsacd
